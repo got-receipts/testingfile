@@ -1199,6 +1199,7 @@ def render_nav(user, cart_count=0):
         links.append('<a href="/dashboard">Dashboard</a>')
         if user["role"] == "client":
             links.append(f'<a href="/#bag-widget">Bag ({cart_count})</a>')
+            links.append('<button type="button" class="button ghost nav-activity-button" id="open-activity-widget">Activity</button>')
         if user["role"] in {"admin", "helpdesk"}:
             links.append('<a href="/admin">Admin</a>')
         links.append(f'<span class="nav-user">{html.escape(user["name"])} ({html.escape(ROLE_LABELS.get(user["role"], user["role"]))})</span>')
@@ -1209,7 +1210,7 @@ def render_nav(user, cart_count=0):
     return "".join(links)
 
 
-def page(title, body, user=None, message=None, level="info", cart_count=0, auto_refresh=False):
+def page(title, body, user=None, message=None, level="info", cart_count=0, auto_refresh=False, extra_shell=""):
     refresh_script = ""
     if auto_refresh:
         refresh_script = """
@@ -1252,6 +1253,7 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
     {flash_message(message, level)}
     {body}
   </main>
+  {extra_shell}
   {render_help_button(user)}
 </body>
 </html>"""
@@ -1758,6 +1760,47 @@ def render_activity_list(connection, user_id, title="Recent Activity", limit=8):
     """
 
 
+def render_client_activity_widget(connection, user):
+    if not user or user["role"] != "client":
+        return ""
+    rows = personal_activity_rows(connection, user["id"], 12)
+    return f"""
+    <div class="modal-shell is-hidden" id="client-activity-widget">
+      <div class="modal-backdrop" data-close-activity="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Account Activity</span>
+            <h3>Your Recent History</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-activity="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(row['actor_role'] or 'System')}</span><h3>{html.escape(row['action'])}</h3></div><span class='menu-count'>{html.escape(row['created_at'])}</span></div><div class='reason-box'>{html.escape(row['details'] or 'No extra details provided.')}</div></article>" for row in rows) or '<p>No activity logged yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-activity-widget');
+        var modal = document.getElementById('client-activity-widget');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-activity="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
 def render_staff_clock_panel(connection, user):
     if user["role"] in {"client", "admin", "helpdesk"}:
         return ""
@@ -2233,7 +2276,7 @@ def render_store_page(connection, user=None, message=None, level="info", filters
       }})();
     </script>
     """
-    return page(APP_NAME, body, user=user, message=message, level=level, cart_count=cart_count)
+    return page(APP_NAME, body, user=user, message=message, level=level, cart_count=cart_count, extra_shell=render_client_activity_widget(connection, user))
 
 
 def order_form(connection, product_id, user, error=""):
@@ -2266,6 +2309,7 @@ def order_form(connection, product_id, user, error=""):
         """,
         user=user,
         cart_count=client_cart_count(connection, user["id"]),
+        extra_shell=render_client_activity_widget(connection, user),
     )
 
 
@@ -2338,9 +2382,17 @@ def render_client_dashboard(connection, user, message=None, level="info"):
       </div>
       <div class="order-card-grid">{''.join(cards) if cards else '<p>No orders yet.</p>'}</div>
     </section>
-    {render_activity_list(connection, user["id"], title="Your Account Activity")}
     """
-    return page("Customer Dashboard", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]), auto_refresh=True)
+    return page(
+        "Customer Dashboard",
+        body,
+        user=user,
+        message=message,
+        level=level,
+        cart_count=client_cart_count(connection, user["id"]),
+        auto_refresh=True,
+        extra_shell=render_client_activity_widget(connection, user),
+    )
 
 
 def render_cart_page(connection, user, message=None, level="info"):
@@ -2401,7 +2453,7 @@ def render_cart_page(connection, user, message=None, level="info"):
       </section>
     </section>
     """
-    return page("Your Bag", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]))
+    return page("Your Bag", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]), extra_shell=render_client_activity_widget(connection, user))
 
 
 def render_banker_dashboard(connection, user, message=None, level="info"):
