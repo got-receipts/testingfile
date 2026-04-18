@@ -345,16 +345,16 @@ nav {
   min-height: 44px;
   padding: 0.75rem 1rem;
   border-radius: 999px;
-  border: 1px solid rgba(47, 107, 60, 0.18);
-  background: #f7faef;
-  color: var(--accent-dark);
+  border: 1px solid rgba(160, 245, 164, 0.16);
+  background: linear-gradient(180deg, #232323, #171717);
+  color: #e4fce9;
   font-weight: 700;
 }
 
 .filter-chip.active {
-  background: var(--accent);
+  background: linear-gradient(180deg, #2d2d2d, #202020);
   color: #fff;
-  border-color: var(--accent);
+  border-color: rgba(160, 245, 164, 0.24);
 }
 
 .store-search {
@@ -477,10 +477,12 @@ nav {
 }
 
 .order-card {
-  border: 1px solid rgba(29, 71, 39, 0.1);
+  border: 1px solid var(--line);
   border-radius: 22px;
   padding: 1.2rem;
-  background: linear-gradient(180deg, #fff, rgba(232, 239, 221, 0.74));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.1)),
+    var(--panel-strong);
 }
 
 .order-card-head {
@@ -492,6 +494,7 @@ nav {
 
 .order-card-head h3 {
   margin: 0.3rem 0 0;
+  color: #ffffff;
 }
 
 .order-meta {
