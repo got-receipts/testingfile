@@ -5072,6 +5072,16 @@ def application(environ, start_response):
     return text_response(start_response, page("Not Found", "<section class='panel'><p>That page does not exist.</p></section>"), status="404 Not Found")
 
 
+def initialize_datastores_on_startup():
+    try:
+        init_db()
+    except Exception as exc:
+        print(f"Startup database initialization failed: {exc}")
+
+
+initialize_datastores_on_startup()
+
+
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 
