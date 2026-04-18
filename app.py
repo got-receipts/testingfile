@@ -327,6 +327,7 @@ STATUS_LABELS = {
 }
 
 TRACKER = ["PACKING", "READY_FOR_DISPATCH", "OUT_FOR_DELIVERY", "DELIVERED"]
+BLOCK_SIZE = 5
 
 
 def db_connection():
@@ -848,6 +849,7 @@ def init_db():
                 dispatcher_id INTEGER,
                 picker_id INTEGER,
                 driver_id INTEGER,
+                delivery_block_id INTEGER,
                 review_reason TEXT,
                 cancel_reason TEXT,
                 internal_note TEXT,
@@ -858,6 +860,20 @@ def init_db():
                 FOREIGN KEY (banker_id) REFERENCES users(id),
                 FOREIGN KEY (dispatcher_id) REFERENCES users(id),
                 FOREIGN KEY (picker_id) REFERENCES users(id),
+                FOREIGN KEY (driver_id) REFERENCES users(id),
+                FOREIGN KEY (delivery_block_id) REFERENCES delivery_blocks(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS delivery_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_name TEXT NOT NULL UNIQUE,
+                dispatcher_id INTEGER NOT NULL,
+                driver_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                submitted_at TEXT,
+                FOREIGN KEY (dispatcher_id) REFERENCES users(id),
                 FOREIGN KEY (driver_id) REFERENCES users(id)
             );
 
@@ -929,6 +945,7 @@ def init_db():
         ensure_column(connection, "tickets", "coupon_code TEXT")
         ensure_column(connection, "tickets", "discount_amount REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "credit_applied REAL NOT NULL DEFAULT 0")
+        ensure_column(connection, "tickets", "delivery_block_id INTEGER")
 
         seed_defaults(connection)
         if not CLEANUP_DONE:
@@ -1094,6 +1111,8 @@ def ticket_rows(connection, where_clause="", params=()):
                dispatcher.name AS dispatcher_name,
                picker.name AS picker_name,
                driver.name AS driver_name,
+               delivery_blocks.block_name AS delivery_block_name,
+               delivery_blocks.status AS delivery_block_status,
                COALESCE(SUM(ticket_items.quantity * ticket_items.locked_price), 0) AS total_amount,
                COALESCE(SUM(ticket_items.quantity), 0) AS total_units,
                tickets.discount_amount AS discount_amount,
@@ -1104,6 +1123,7 @@ def ticket_rows(connection, where_clause="", params=()):
         LEFT JOIN users AS dispatcher ON dispatcher.id = tickets.dispatcher_id
         LEFT JOIN users AS picker ON picker.id = tickets.picker_id
         LEFT JOIN users AS driver ON driver.id = tickets.driver_id
+        LEFT JOIN delivery_blocks ON delivery_blocks.id = tickets.delivery_block_id
         LEFT JOIN ticket_items ON ticket_items.ticket_id = tickets.id
         {where_clause}
         GROUP BY tickets.id
@@ -1335,6 +1355,56 @@ def generate_ticket_number(connection):
     while connection.execute("SELECT id FROM tickets WHERE ticket_number = ?", (ticket_number,)).fetchone():
         ticket_number = f"BH-{datetime.utcnow().strftime('%Y%m%d')}-{secrets.token_hex(3).upper()}"
     return ticket_number
+
+
+def generate_block_name(connection):
+    block_name = f"BLOCK-{datetime.utcnow().strftime('%Y%m%d')}-{secrets.token_hex(2).upper()}"
+    while connection.execute("SELECT id FROM delivery_blocks WHERE block_name = ?", (block_name,)).fetchone():
+        block_name = f"BLOCK-{datetime.utcnow().strftime('%Y%m%d')}-{secrets.token_hex(2).upper()}"
+    return block_name
+
+
+def create_delivery_block(connection, dispatcher_id):
+    block_name = generate_block_name(connection)
+    cursor = connection.execute(
+        """
+        INSERT INTO delivery_blocks (block_name, dispatcher_id, status, created_at, updated_at)
+        VALUES (?, ?, 'OPEN', ?, ?)
+        """,
+        (block_name, dispatcher_id, now_iso(), now_iso()),
+    )
+    return cursor.lastrowid
+
+
+def delivery_block_rows(connection, where_clause="", params=()):
+    return connection.execute(
+        f"""
+        SELECT delivery_blocks.*,
+               dispatcher.name AS dispatcher_name,
+               driver.name AS driver_name,
+               COUNT(tickets.id) AS ticket_count,
+               COALESCE(SUM(CASE WHEN tickets.status NOT IN ('CANCELED', 'DELIVERED') THEN 1 ELSE 0 END), 0) AS active_ticket_count
+        FROM delivery_blocks
+        LEFT JOIN users AS dispatcher ON dispatcher.id = delivery_blocks.dispatcher_id
+        LEFT JOIN users AS driver ON driver.id = delivery_blocks.driver_id
+        LEFT JOIN tickets ON tickets.delivery_block_id = delivery_blocks.id
+        {where_clause}
+        GROUP BY delivery_blocks.id
+        ORDER BY delivery_blocks.updated_at DESC, delivery_blocks.id DESC
+        """,
+        params,
+    ).fetchall()
+
+
+def delivery_block_tickets_map(connection, block_ids):
+    if not block_ids:
+        return {}
+    placeholders = ",".join("?" for _ in block_ids)
+    rows = ticket_rows(connection, f"WHERE tickets.delivery_block_id IN ({placeholders})", tuple(block_ids))
+    grouped = {block_id: [] for block_id in block_ids}
+    for row in rows:
+        grouped.setdefault(row["delivery_block_id"], []).append(row)
+    return grouped
 
 
 def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, coupon_code="", use_credits=False):
@@ -1796,8 +1866,12 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection, "", ())
     emergency_alerts = support_rows(connection, "WHERE support_tickets.category LIKE 'EMERGENCY_%' AND support_tickets.status != 'CLOSED'", ())
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    blocks = delivery_block_rows(connection)
+    block_ticket_map = delivery_block_tickets_map(connection, [block["id"] for block in blocks])
     drivers = connection.execute("SELECT id, name FROM users WHERE role = 'driver' ORDER BY name").fetchall()
     driver_options = "".join(f"<option value='{driver['id']}'>{html.escape(driver['name'])}</option>" for driver in drivers)
+    open_blocks = [block for block in blocks if block["status"] == "OPEN"]
+    block_options = "".join(f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>" for block in open_blocks)
     cards = []
     for ticket in tickets:
         actions = []
@@ -1816,9 +1890,23 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
                 f"""
                 <form method="post" action="/orders/update" class="action-stack">
                   <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="assign_driver">
-                  <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
-                  <button type="submit">Assign Driver</button>
+                  <input type="hidden" name="action" value="assign_to_block">
+                  <label>Assign to Block
+                    <select name="block_id" required>
+                      <option value="">Choose open block</option>
+                      {block_options}
+                    </select>
+                  </label>
+                  <button type="submit" {'disabled' if not open_blocks else ''}>Assign Ticket to Block</button>
+                </form>
+                """
+            )
+            actions.append(
+                f"""
+                <form method="post" action="/orders/update" class="action-stack">
+                  <input type="hidden" name="order_id" value="{ticket["id"]}">
+                  <input type="hidden" name="action" value="create_block_for_ticket">
+                  <button type="submit">Create New Block and Add Ticket</button>
                 </form>
                 """
             )
@@ -1875,6 +1963,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
                   <span>Total: {format_money(ticket["total_amount"])}</span>
                   <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
                   <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
+                  <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
                   <span>Payment: {html.escape(ticket["payment_status"])}</span>
                   <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
                 </div>
@@ -1886,9 +1975,50 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
             </article>
             """
         )
+    block_cards = []
+    for block in blocks:
+        block_tickets = block_ticket_map.get(block["id"], [])
+        active_count = block["active_ticket_count"]
+        can_submit = block["status"] == "OPEN" and active_count == BLOCK_SIZE
+        block_actions = ""
+        if block["status"] == "OPEN":
+            block_actions = f"""
+            <form method="post" action="/orders/update" class="action-stack">
+              <input type="hidden" name="order_id" value="{block_tickets[0]['id'] if block_tickets else 0}">
+              <input type="hidden" name="block_id" value="{block["id"]}">
+              <input type="hidden" name="action" value="submit_block">
+              <label>Assign Driver<select name="driver_id" required><option value="">Choose driver</option>{driver_options}</select></label>
+              <button type="submit" {'disabled' if not can_submit else ''}>Submit Block to Driver</button>
+            </form>
+            """
+            if active_count != BLOCK_SIZE:
+                block_actions += f"<div class='tracker-note warning-note'>Blocks must have exactly {BLOCK_SIZE} tickets before dispatch can submit them to a driver.</div>"
+        else:
+            block_actions = "<span class='subtle'>This block was already submitted to a driver.</span>"
+        block_cards.append(
+            f"""
+            <article class="order-card">
+              <div class="order-card-head">
+                <div><span class="eyebrow">Dispatch Block</span><h3>{html.escape(block["block_name"])}</h3></div>
+                <span class="menu-count">{active_count}/{BLOCK_SIZE} tickets</span>
+              </div>
+              <div class="order-meta">
+                <span>Status: {html.escape(block["status"].title())}</span>
+                <span>Driver: {html.escape(block["driver_name"] or 'Unassigned')}</span>
+                <span>Dispatcher: {html.escape(block["dispatcher_name"] or 'Dispatch')}</span>
+              </div>
+              <div class="item-pill-list">
+                {''.join(f"<div class='item-pill'><strong>{html.escape(ticket['ticket_number'])}</strong><span>{html.escape(ticket['client_name'])}</span></div>" for ticket in block_tickets) or '<p>No tickets in this block yet.</p>'}
+              </div>
+              <div class="ticket-actions">{block_actions}</div>
+            </article>
+            """
+        )
     body = f"""
     <section class="stats-row">
       <div class="stat-card"><span>Ready for Driver</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'READY_FOR_DISPATCH')}</strong></div>
+      <div class="stat-card"><span>Open Blocks</span><strong>{sum(1 for block in blocks if block['status'] == 'OPEN')}</strong></div>
+      <div class="stat-card"><span>Submitted Blocks</span><strong>{sum(1 for block in blocks if block['status'] == 'SUBMITTED')}</strong></div>
       <div class="stat-card"><span>Needs Review</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'REVIEW_REQUIRED')}</strong></div>
       <div class="stat-card"><span>Active Tickets</span><strong>{sum(1 for ticket in tickets if ticket['status'] != 'CANCELED')}</strong></div>
       <div class="stat-card"><span>Emergency Alerts</span><strong>{len(emergency_alerts)}</strong></div>
@@ -1918,6 +2048,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
         ) or '<p>No active emergency alerts.</p>'}
       </div>
     </section>
+    <section class="panel"><h2>Dispatch Blocks</h2><div class="order-card-grid">{''.join(block_cards) if block_cards else '<p>No blocks created yet.</p>'}</div></section>
     <section class="panel"><h2>Dispatch Board</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No dispatch work waiting.</p>'}</div></section>
     {render_credit_issue_panel(connection)}
     """
@@ -1978,6 +2109,7 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
 def render_driver_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection, "WHERE tickets.driver_id = ? AND tickets.status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    block_names = sorted({ticket["delivery_block_name"] for ticket in tickets if ticket["delivery_block_name"]})
     cards = []
     for ticket in tickets:
         button = "Start Route" if ticket["status"] == "DRIVER_ASSIGNED" else "Mark Delivered"
@@ -1993,6 +2125,7 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
                   <span>Total: {format_money(ticket["total_amount"])}</span>
                   <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
                   <span>Address: {html.escape(ticket["shipping_address"])}</span>
+                  <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending')}</span>
                   <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
                   <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
                 </div>
@@ -2050,6 +2183,7 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
         )
     body = f"""
     <section class="stats-row">
+      <div class="stat-card"><span>Assigned Blocks</span><strong>{len(block_names)}</strong></div>
       <div class="stat-card"><span>Assigned Routes</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'DRIVER_ASSIGNED')}</strong></div>
       <div class="stat-card"><span>Live Deliveries</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'OUT_FOR_DELIVERY')}</strong></div>
     </section>
@@ -2292,6 +2426,28 @@ def update_ticket(connection, ticket_id, **fields):
     values.append(now_iso())
     values.append(ticket_id)
     connection.execute(f"UPDATE tickets SET {', '.join(assignments)} WHERE id = ?", values)
+
+
+def refresh_delivery_block_status(connection, block_id):
+    if not block_id:
+        return
+    block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+    if not block:
+        return
+    count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM tickets WHERE delivery_block_id = ? AND status NOT IN ('CANCELED', 'DELIVERED')",
+        (block_id,),
+    ).fetchone()
+    active_count = count_row["count"] if count_row else 0
+    if active_count == 0:
+        connection.execute("DELETE FROM delivery_blocks WHERE id = ?", (block_id,))
+        return
+    if block["status"] == "SUBMITTED":
+        return
+    connection.execute(
+        "UPDATE delivery_blocks SET updated_at = ? WHERE id = ?",
+        (now_iso(), block_id),
+    )
 
 
 def handle_login(environ, start_response, connection):
@@ -2564,7 +2720,9 @@ def handle_update_order(environ, start_response, connection, user):
             if not reason:
                 return redirect(start_response, "/dashboard?message=Cancel reason is required")
             release_ticket_stock(connection, ticket_id)
-            update_ticket(connection, ticket_id, status="CANCELED", cancel_reason=reason)
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="CANCELED", cancel_reason=reason, delivery_block_id=None)
+            refresh_delivery_block_status(connection, prior_block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Order canceled")
         return redirect(start_response, "/dashboard?message=That customer action is not allowed")
@@ -2592,18 +2750,65 @@ def handle_update_order(environ, start_response, connection, user):
             update_ticket(connection, ticket_id, status="DELIVERED", dispatcher_id=user["id"], internal_note="Customer picked up in person.")
             connection.commit()
             return redirect(start_response, "/dashboard?message=Pickup completed")
-        if action == "assign_driver" and ticket["status"] == "READY_FOR_DISPATCH":
+        if action == "create_block_for_ticket" and ticket["status"] == "READY_FOR_DISPATCH":
+            block_id = create_delivery_block(connection, user["id"])
+            update_ticket(connection, ticket_id, delivery_block_id=block_id, dispatcher_id=user["id"], internal_note=f"Assigned to block {connection.execute('SELECT block_name FROM delivery_blocks WHERE id = ?', (block_id,)).fetchone()['block_name']}")
+            refresh_delivery_block_status(connection, block_id)
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket added to new block")
+        if action == "assign_to_block" and ticket["status"] == "READY_FOR_DISPATCH":
+            block_id = int(data.get("block_id", "0"))
+            block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+            if not block or block["status"] != "OPEN":
+                return redirect(start_response, "/dashboard?message=Choose a valid open block")
+            block_ticket_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM tickets WHERE delivery_block_id = ? AND status NOT IN ('CANCELED', 'DELIVERED')",
+                (block_id,),
+            ).fetchone()["count"]
+            if block_ticket_count >= BLOCK_SIZE:
+                return redirect(start_response, f"/dashboard?message=That block already has {BLOCK_SIZE} tickets")
+            update_ticket(connection, ticket_id, delivery_block_id=block_id, dispatcher_id=user["id"], internal_note=f"Assigned to block {block['block_name']}")
+            refresh_delivery_block_status(connection, block_id)
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket assigned to block")
+        if action == "submit_block" and ticket["status"] == "READY_FOR_DISPATCH":
+            block_id = int(data.get("block_id", "0"))
+            block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+            driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
+            if not block or block["status"] != "OPEN":
+                return redirect(start_response, "/dashboard?message=Choose a valid open block")
             driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
-            update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], internal_note=None)
+            block_tickets = connection.execute(
+                "SELECT id FROM tickets WHERE delivery_block_id = ? AND status = 'READY_FOR_DISPATCH' ORDER BY created_at ASC, id ASC",
+                (block_id,),
+            ).fetchall()
+            if len(block_tickets) != BLOCK_SIZE:
+                return redirect(start_response, f"/dashboard?message=Blocks need exactly {BLOCK_SIZE} ready tickets before dispatch can submit them")
+            connection.execute(
+                "UPDATE delivery_blocks SET driver_id = ?, status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ?",
+                (driver["id"], now_iso(), now_iso(), block_id),
+            )
+            block_name = block["block_name"]
+            for block_ticket in block_tickets:
+                update_ticket(
+                    connection,
+                    block_ticket["id"],
+                    status="DRIVER_ASSIGNED",
+                    driver_id=driver["id"],
+                    dispatcher_id=user["id"],
+                    internal_note=f"Submitted in {block_name}",
+                )
             connection.commit()
-            return redirect(start_response, "/dashboard?message=Driver assigned")
+            return redirect(start_response, "/dashboard?message=Block submitted to driver")
         if action == "pull_back" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
             reason = data.get("reason", "").strip()
             if not reason:
                 return redirect(start_response, "/dashboard?message=Pull back reason is required")
-            update_ticket(connection, ticket_id, status="READY_FOR_DISPATCH", dispatcher_id=user["id"], driver_id=None, internal_note=reason)
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="READY_FOR_DISPATCH", dispatcher_id=user["id"], driver_id=None, delivery_block_id=None, internal_note=reason)
+            refresh_delivery_block_status(connection, prior_block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket pulled back to dispatch")
         if action == "cancel_order" and ticket["status"] not in {"DELIVERED", "CANCELED"}:
@@ -2611,7 +2816,9 @@ def handle_update_order(environ, start_response, connection, user):
             if not reason:
                 return redirect(start_response, "/dashboard?message=Cancel reason is required")
             release_ticket_stock(connection, ticket_id)
-            update_ticket(connection, ticket_id, status="CANCELED", dispatcher_id=user["id"], driver_id=None, cancel_reason=reason)
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="CANCELED", dispatcher_id=user["id"], driver_id=None, delivery_block_id=None, cancel_reason=reason)
+            refresh_delivery_block_status(connection, prior_block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket canceled")
         if action == "resolve_review" and ticket["status"] == "REVIEW_REQUIRED":
@@ -2629,7 +2836,9 @@ def handle_update_order(environ, start_response, connection, user):
                 reserve_ticket_stock(connection, ticket_id)
             except ValueError as exc:
                 return redirect(start_response, f"/dashboard?message={str(exc)}")
-            update_ticket(connection, ticket_id, status="PACKING", dispatcher_id=user["id"], review_reason=None, picker_id=None, driver_id=None, internal_note="Dispatcher updated products after review.")
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="PACKING", dispatcher_id=user["id"], review_reason=None, picker_id=None, driver_id=None, delivery_block_id=None, internal_note="Dispatcher updated products after review.")
+            refresh_delivery_block_status(connection, prior_block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket updated and returned to packing")
         return redirect(start_response, "/dashboard?message=That dispatch action is not allowed")
