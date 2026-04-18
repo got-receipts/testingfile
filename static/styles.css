@@ -1,18 +1,18 @@
 :root {
-  --bg: #eef2e7;
-  --panel: #fcfdf9;
-  --panel-strong: #f2f5e9;
-  --panel-alt: #e8efdd;
-  --text: #1f2a1f;
-  --muted: #526152;
-  --line: #d7dfcf;
-  --accent: #2f6b3c;
-  --accent-dark: #1d4727;
-  --accent-soft: #d9e7d2;
-  --success: #1f6b49;
-  --warning: #7a5b19;
-  --info: #2d5f54;
-  --shadow: 0 16px 40px rgba(31, 56, 32, 0.08);
+  --bg: #323232;
+  --panel: #3a3a3a;
+  --panel-strong: #2e2e2e;
+  --panel-alt: #454545;
+  --text: #f7f8f3;
+  --muted: #d4dbc7;
+  --line: rgba(255, 255, 255, 0.12);
+  --accent: #19b526;
+  --accent-dark: #a0f5a4;
+  --accent-soft: rgba(25, 181, 38, 0.12);
+  --success: #19b526;
+  --warning: #f0c447;
+  --info: #2c91d4;
+  --shadow: 0 20px 50px rgba(0, 0, 0, 0.28);
 }
 
 * {
@@ -21,10 +21,11 @@
 
 body {
   margin: 0;
-  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+  font-family: "Poppins", "Segoe UI", sans-serif;
   background:
-    radial-gradient(circle at top left, rgba(47, 107, 60, 0.12), transparent 35%),
-    linear-gradient(180deg, #f7faef 0%, var(--bg) 100%);
+    radial-gradient(circle at top left, rgba(25, 181, 38, 0.16), transparent 28%),
+    radial-gradient(circle at top right, rgba(44, 145, 212, 0.12), transparent 24%),
+    linear-gradient(180deg, #3b3b3b 0%, var(--bg) 100%);
   color: var(--text);
 }
 
@@ -39,15 +40,48 @@ a {
   gap: 1.5rem;
   align-items: flex-start;
   padding: 2rem 4rem;
-  border-bottom: 1px solid rgba(29, 71, 39, 0.12);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0));
+}
+
+.brand {
+  min-width: 0;
+}
+
+.brand-mark {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.brand-mark img {
+  width: clamp(72px, 9vw, 108px);
+  height: auto;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 10px 24px rgba(0, 0, 0, 0.35));
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-copy strong {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: clamp(1.5rem, 3.8vw, 2.8rem);
+  line-height: 1;
+  color: #ffffff;
+  font-family: "Fredericka the Great", serif;
 }
 
 .brand h1 {
-  margin: 0.35rem 0 0;
+  margin: 0.4rem 0 0;
   max-width: 48rem;
-  font-size: clamp(1.7rem, 4vw, 3rem);
-  line-height: 1.06;
-  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1rem, 2vw, 1.2rem);
+  line-height: 1.5;
+  font-family: "Poppins", "Segoe UI", sans-serif;
+  font-weight: 500;
+  color: var(--muted);
 }
 
 .brand-kicker,
@@ -82,7 +116,7 @@ nav {
 .product-card,
 .menu-section {
   background: var(--panel);
-  border: 1px solid rgba(29, 71, 39, 0.1);
+  border: 1px solid var(--line);
   border-radius: 24px;
   box-shadow: var(--shadow);
 }
@@ -93,18 +127,30 @@ nav {
   grid-template-columns: 1.6fr 1fr;
   gap: 1.5rem;
   margin-bottom: 2rem;
+  background:
+    linear-gradient(135deg, rgba(25, 181, 38, 0.08), rgba(44, 145, 212, 0.05)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.08)),
+    var(--panel);
 }
 
 .hero h2 {
   margin: 0.4rem 0 0.8rem;
   font-size: clamp(1.8rem, 3.4vw, 3rem);
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: "Fredericka the Great", serif;
+  line-height: 1.12;
+  color: #ffffff;
 }
 
 .hero p,
 .product-card p {
   color: var(--muted);
   line-height: 1.5;
+}
+
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .hero-flow,
@@ -176,8 +222,8 @@ nav {
 .hero-flow div {
   padding: 1rem;
   border-radius: 18px;
-  background: linear-gradient(135deg, rgba(47, 107, 60, 0.14), rgba(223, 236, 214, 0.8));
-  border: 1px solid rgba(47, 107, 60, 0.12);
+  background: linear-gradient(135deg, rgba(25, 181, 38, 0.14), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(160, 245, 164, 0.18);
   font-weight: 700;
 }
 
@@ -189,19 +235,19 @@ nav {
 }
 
 .hero-summary {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(217, 231, 210, 0.75));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(0, 0, 0, 0.14));
   border-radius: 20px;
   padding: 1.1rem 1.2rem;
-  border: 1px solid rgba(47, 107, 60, 0.14);
+  border: 1px solid rgba(160, 245, 164, 0.14);
 }
 
 .notice-strip {
   margin-top: 1rem;
   padding: 0.9rem 1rem;
   border-radius: 16px;
-  background: rgba(47, 107, 60, 0.08);
-  border: 1px solid rgba(47, 107, 60, 0.12);
-  color: var(--accent-dark);
+  background: rgba(25, 181, 38, 0.1);
+  border: 1px solid rgba(160, 245, 164, 0.18);
+  color: #e4fce9;
   font-weight: 600;
 }
 
@@ -209,6 +255,39 @@ nav {
   display: block;
   font-size: 1.35rem;
   margin: 0.35rem 0;
+}
+
+.hero-media-frame {
+  position: relative;
+  overflow: hidden;
+  min-height: 280px;
+  border-radius: 22px;
+  border: 1px solid rgba(160, 245, 164, 0.16);
+  background: #1b1b1b;
+}
+
+.hero-video {
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+  object-fit: cover;
+  display: block;
+  filter: saturate(1.05) contrast(1.02);
+}
+
+.hero-video-overlay {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: grid;
+  gap: 0.3rem;
+  padding: 1rem 1.1rem 1.15rem;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.78));
+}
+
+.hero-video-overlay strong {
+  color: #ffffff;
+  font-size: 1.4rem;
+  font-family: "Fredericka the Great", serif;
 }
 
 .product-grid {
@@ -240,7 +319,8 @@ nav {
 .menu-section h3 {
   margin: 0.35rem 0 0;
   font-size: 1.5rem;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: "Fredericka the Great", serif;
+  color: #ffffff;
 }
 
 .menu-note {
@@ -254,7 +334,7 @@ nav {
   border-radius: 999px;
   padding: 0.45rem 0.8rem;
   background: var(--panel-alt);
-  color: var(--accent-dark);
+  color: #ffffff;
   font-weight: 700;
   white-space: nowrap;
 }

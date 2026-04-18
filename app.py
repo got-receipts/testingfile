@@ -16,8 +16,8 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "verification")
 PRODUCT_UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "products")
 SESSION_COOKIE = "budhub_session"
-APP_NAME = "Budhub"
-APP_TAGLINE = "Licensed cannabis delivery with live menus, simple checkout, and clear order tracking."
+APP_NAME = "Official BudHub"
+APP_TAGLINE = "The 518 cannabis delivery platform for Albany, Schenectady, Troy, and the wider Capital Region."
 CLEANUP_DONE = False
 
 MENU_SECTIONS = ["Flower", "Edibles", "Concentrates", "General"]
@@ -1185,13 +1185,22 @@ def page(title, body, user=None, message=None, level="info", cart_count=0):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <header class="site-header">
     <div class="brand">
-      <span class="brand-kicker">{APP_NAME}</span>
-      <h1>{APP_TAGLINE}</h1>
+      <a class="brand-mark" href="/">
+        <img src="/static/budhub-logo.png" alt="{APP_NAME} logo">
+        <div class="brand-copy">
+          <span class="brand-kicker">Capital Region Cannabis Platform</span>
+          <strong>{APP_NAME}</strong>
+          <h1>{APP_TAGLINE}</h1>
+        </div>
+      </a>
     </div>
     <nav>{render_nav(user, cart_count=cart_count)}</nav>
   </header>
@@ -1208,7 +1217,7 @@ def login_form(error=""):
     return f"""
     <section class="panel narrow">
       <h2>Login</h2>
-      <p>Budhub sends each role to its own workspace.</p>
+      <p>Sign in to the BudHub workspace for customers, operators, dispatch, drivers, or engineering support across the 518 market.</p>
       {flash_message(error, "error")}
       <form method="post" action="/login" class="form-grid">
         <label>Email<input type="email" name="email" required></label>
@@ -1223,7 +1232,7 @@ def register_form(error=""):
     return f"""
     <section class="panel narrow">
       <h2>Create Customer Account</h2>
-      <p>Upload ID front, ID back, and a selfie holding your ID. New accounts stay pending until admin verification is complete.</p>
+      <p>Join BudHub for verified cannabis ordering in the Capital Region. Upload your ID front, ID back, and a selfie holding your ID so the team can approve your account.</p>
       {flash_message(error, "error")}
       <form method="post" action="/register" class="form-grid" enctype="multipart/form-data">
         <label>Full Name<input type="text" name="name" required></label>
@@ -1236,7 +1245,7 @@ def register_form(error=""):
       </form>
       <div class="demo-box" id="support-access">
         <strong>Need help with registration?</strong>
-        <p class="demo-note">Use this form if you are blocked before you can finish account creation. After you have an account, the discreet Budhub Help button opens your full message thread.</p>
+        <p class="demo-note">Use this form if something is blocking access before you can finish account creation. Once you are inside the platform, the discreet BudHub help button opens your full support thread.</p>
         <form method="post" action="/guest-help" class="form-grid">
           <label>Name<input type="text" name="name" required></label>
           <label>Email<input type="email" name="email" required></label>
@@ -1822,29 +1831,41 @@ def render_store_page(connection, user=None, message=None, level="info", filters
 
     body = f"""
     <section class="hero">
-      <div>
-        <span class="eyebrow">Licensed Cannabis Delivery</span>
-        <h2>Shop the Budhub live menu with flower, concentrates, edibles, delivery, and pickup.</h2>
-        <p>The storefront now uses submenu browsing, quick search by product name, and an in-page bag widget so customers can keep shopping without being kicked to a separate cart screen.</p>
+      <div class="hero-copy">
+        <span class="eyebrow">Official BudHub | 518 Delivery</span>
+        <h2>The Capital Region's cannabis menu for Albany, Troy, Schenectady, and the wider 518 community.</h2>
+        <p>Browse live flower, concentrates, and edibles with submenu filtering, Leafly-connected strain references, fast name search, and an in-page bag widget that keeps customers shopping without interruption.</p>
         {f"<div class='tracker-note'>Available credits: {format_money(user['credit_balance'])}</div>" if user and user['role'] == 'client' else ""}
         <div class="hero-actions">
           <a class="button" href="{'/#bag-widget' if user and user['role'] == 'client' else '/login'}">{'Open Bag Widget' if user and user['role'] == 'client' else 'Customer Login'}</a>
           <a class="button ghost" href="{'/dashboard' if user else '/register'}">{'View Dashboard' if user else 'Create Account'}</a>
         </div>
+        <div class="notice-strip">Founded in Albany and built for locals, BudHub keeps the 518 menu, dispatch flow, customer support, and delivery visibility in one system.</div>
       </div>
       <div class="hero-side">
+        <div class="hero-media-frame">
+          <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="/static/budhub-logo.png">
+            <source src="/static/rolling_banner.mp4" type="video/mp4">
+          </video>
+          <div class="hero-video-overlay">
+            <span class="eyebrow">518 Brand Reel</span>
+            <strong>Official BudHub</strong>
+            <span>Capital Region cannabis delivery, built by locals for locals.</span>
+          </div>
+        </div>
         <div class="hero-flow">
-          <div>Browse the menu and build your bag</div>
-          <div>Choose delivery or pickup details</div>
-          <div>Confirm the order and dispatch</div>
-          <div>Track progress while the order is on the way</div>
-          <div>Complete handoff with payment and ID check</div>
+          <div>Explore flower, concentrates, and edibles by submenu</div>
+          <div>Search by strain or product name without leaving the menu</div>
+          <div>Build the bag while staying inside the storefront experience</div>
+          <div>Route verified orders through dispatch, blocks, drivers, and tracking</div>
+          <div>Support customers, credits, coupons, and account help from one platform</div>
         </div>
         <div class="hero-summary">
-          <span class="eyebrow">Storefront</span>
+          <span class="eyebrow">Current Menu</span>
           <strong>{len(products)} items available</strong>
           <span>{cart_count} items ready in bag</span>
           <span>{sum(1 for product in products if product["category"] == "Flower" and is_double_stuffed_product(product))} Double Stuffed flower options</span>
+          <a class="source-link" href="/static/Info_vid.mov" target="_blank" rel="noopener noreferrer">Open BudHub promo video</a>
         </div>
       </div>
     </section>
@@ -1853,7 +1874,7 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         <section class="menu-section">
           <div class="menu-section-head">
             <div>
-              <span class="eyebrow">Browse Submenus</span>
+              <span class="eyebrow">Browse 518 Submenus</span>
               <h3>{html.escape(filters["category"] if filters["category"] != "All" else "All Menu Items")}</h3>
             </div>
             <span class="menu-count">{len(visible_products)} matches</span>
@@ -2460,15 +2481,78 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
         ORDER BY created_at ASC
         """
     ).fetchall()
+    title = "Engineer Tools" if user["role"] == "helpdesk" else "Admin Tools"
+    engineer_stats = ""
+    engineer_sections = ""
+    if user["role"] == "helpdesk":
+        engineer_stats = f"""
+      <div class="stat-card"><span>Support Inbox</span><strong>{sum(1 for ticket in support if ticket['status'] != 'CLOSED')}</strong></div>
+      <div class="stat-card"><span>Registration Help</span><strong>{sum(1 for request in guest_help if request['status'] != 'CLOSED')}</strong></div>
+      <div class="stat-card"><span>Emergency Alerts</span><strong>{sum(1 for ticket in support if str(ticket['category']).startswith('EMERGENCY_') and ticket['status'] != 'CLOSED')}</strong></div>
+        """
+        engineer_sections = f"""
+    <section class="admin-grid">
+      <section class="panel">
+        <h2>Support Inbox</h2>
+        <div class="order-card-grid">
+          {''.join(
+              f'''
+              <article class="order-card">
+                <div class="order-card-head">
+                  <div><span class="eyebrow">{html.escape(ticket["category"])}</span><h3>{html.escape(ticket["user_name"])}</h3></div>
+                  <span class="badge badge-{"placed" if ticket["status"] != "CLOSED" else "delivered"}">{html.escape(ticket["status"].title())}</span>
+                </div>
+                <div class="order-meta">
+                  <span>User: {html.escape(ticket["user_email"])}</span>
+                  <span>Opened By: {html.escape(ticket["opened_by_name"])}</span>
+                  <span>Assigned To: {html.escape(ticket["assigned_to_name"] or "Unassigned")}</span>
+                  <span>Priority: {html.escape(ticket["priority"])}</span>
+                  <span>Ticket: {html.escape(ticket["related_ticket_number"] or "N/A")}</span>
+                </div>
+                <div class="reason-box {'emergency-medical' if ticket['category']=='EMERGENCY_MEDICAL_EMERGENCY' else 'emergency-accident' if ticket['category']=='EMERGENCY_CAR_ACCIDENT' else 'emergency-robbery' if ticket['category']=='EMERGENCY_ROBBERY' else 'emergency-traffic' if ticket['category']=='EMERGENCY_TRAFFIC_STOP' else ''}">{html.escape(ticket["reason"])}</div>
+                <div class="item-pill-list">
+                  {''.join(f"<div class='item-pill'><strong>{html.escape(message['author_name'])}</strong><span>{html.escape(message['message'])}</span></div>" for message in support_messages.get(ticket['id'], [])) or '<p>No replies yet.</p>'}
+                </div>
+                <form method="post" action="/support/update" class="action-stack">
+                  <input type="hidden" name="ticket_id" value="{ticket["id"]}">
+                  <label>Assign To
+                    <select name="assigned_to">
+                      <option value="">Unassigned</option>
+                      {''.join(f"<option value='{account['id']}' {'selected' if ticket['assigned_to'] == account['id'] else ''}>{html.escape(account['name'])}</option>" for account in users if account['role'] in {'admin', 'helpdesk'})}
+                    </select>
+                  </label>
+                  <label>Review Status<select name="status"><option value="OPEN">Open</option><option value="REVIEWED">Reviewed</option><option value="CLOSED">Closed</option></select></label>
+                  <label>Reply<textarea name="reply_message" placeholder="Reply to the user from admin/helpdesk"></textarea></label>
+                  <label>Resolution Note<textarea name="resolution_note" placeholder="Optional review note"></textarea></label>
+                  <button type="submit">Update Support Ticket</button>
+                </form>
+              </article>
+              '''
+              for ticket in support
+          ) or '<p>No support tickets in the inbox.</p>'}
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Registration Help Requests</h2>
+        <div class="order-card-grid">
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(request['email'])}</span><h3>{html.escape(request['name'])}</h3></div><span class='menu-count'>{html.escape(request['status'])}</span></div><div class='reason-box'>{html.escape(request['issue'])}</div><form method='post' action='/guest-help/update' class='action-stack'><input type='hidden' name='request_id' value='{request['id']}'><label>Status<select name='status'><option value='OPEN'>Open</option><option value='REVIEWED'>Reviewed</option><option value='CLOSED'>Closed</option></select></label><label>Response Note<textarea name='response_note' placeholder='Internal follow-up or response summary'></textarea></label><button type='submit'>Update Request</button></form></article>" for request in guest_help) or '<p>No registration help requests yet.</p>'}
+        </div>
+      </section>
+    </section>
+    <section class="panel">
+      <h2>Account Activity Log</h2>
+      <div class="order-card-grid">
+        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(log['actor_role'] or 'System')}</span><h3>{html.escape(log['actor_name'] or 'System')}</h3></div><span class='menu-count'>{html.escape(log['created_at'])}</span></div><div class='order-meta'><span>Action: {html.escape(log['action'])}</span><span>Target: {html.escape(log['target_user_name'] or 'N/A')}</span></div><div class='reason-box'>{html.escape(log['details'] or 'No extra details provided.')}</div></article>" for log in activity_logs) or '<p>No activity logged yet.</p>'}
+      </div>
+    </section>
+        """
     body = f"""
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{len(users)}</strong></div>
       <div class="stat-card"><span>Menu Items</span><strong>{len(products)}</strong></div>
       <div class="stat-card"><span>Budhub Tickets</span><strong>{len(tickets)}</strong></div>
-      <div class="stat-card"><span>Support Inbox</span><strong>{sum(1 for ticket in support if ticket['status'] != 'CLOSED')}</strong></div>
-      <div class="stat-card"><span>Registration Help</span><strong>{sum(1 for request in guest_help if request['status'] != 'CLOSED')}</strong></div>
       <div class="stat-card"><span>ID Reviews</span><strong>{len(verification_queue)}</strong></div>
-      <div class="stat-card"><span>Emergency Alerts</span><strong>{sum(1 for ticket in support if str(ticket['category']).startswith('EMERGENCY_') and ticket['status'] != 'CLOSED')}</strong></div>
+      {engineer_stats}
     </section>
     <section class="admin-grid">
       <section class="panel">
@@ -2597,64 +2681,15 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
           ) or '<p>No accounts available.</p>'}
         </div>
       </section>
-      <section class="panel">
-        <h2>Support Inbox</h2>
-        <div class="order-card-grid">
-          {''.join(
-              f'''
-              <article class="order-card">
-                <div class="order-card-head">
-                  <div><span class="eyebrow">{html.escape(ticket["category"])}</span><h3>{html.escape(ticket["user_name"])}</h3></div>
-                  <span class="badge badge-{"placed" if ticket["status"] != "CLOSED" else "delivered"}">{html.escape(ticket["status"].title())}</span>
-                </div>
-                <div class="order-meta">
-                  <span>User: {html.escape(ticket["user_email"])}</span>
-                  <span>Opened By: {html.escape(ticket["opened_by_name"])}</span>
-                  <span>Assigned To: {html.escape(ticket["assigned_to_name"] or "Unassigned")}</span>
-                  <span>Priority: {html.escape(ticket["priority"])}</span>
-                  <span>Ticket: {html.escape(ticket["related_ticket_number"] or "N/A")}</span>
-                </div>
-                <div class="reason-box {'emergency-medical' if ticket['category']=='EMERGENCY_MEDICAL_EMERGENCY' else 'emergency-accident' if ticket['category']=='EMERGENCY_CAR_ACCIDENT' else 'emergency-robbery' if ticket['category']=='EMERGENCY_ROBBERY' else 'emergency-traffic' if ticket['category']=='EMERGENCY_TRAFFIC_STOP' else ''}">{html.escape(ticket["reason"])}</div>
-                <div class="item-pill-list">
-                  {''.join(f"<div class='item-pill'><strong>{html.escape(message['author_name'])}</strong><span>{html.escape(message['message'])}</span></div>" for message in support_messages.get(ticket['id'], [])) or '<p>No replies yet.</p>'}
-                </div>
-                <form method="post" action="/support/update" class="action-stack">
-                  <input type="hidden" name="ticket_id" value="{ticket["id"]}">
-                  <label>Assign To
-                    <select name="assigned_to">
-                      <option value="">Unassigned</option>
-                      {''.join(f"<option value='{account['id']}' {'selected' if ticket['assigned_to'] == account['id'] else ''}>{html.escape(account['name'])}</option>" for account in users if account['role'] in {'admin', 'helpdesk'})}
-                    </select>
-                  </label>
-                  <label>Review Status<select name="status"><option value="OPEN">Open</option><option value="REVIEWED">Reviewed</option><option value="CLOSED">Closed</option></select></label>
-                  <label>Reply<textarea name="reply_message" placeholder="Reply to the user from admin/helpdesk"></textarea></label>
-                  <label>Resolution Note<textarea name="resolution_note" placeholder="Optional review note"></textarea></label>
-                  <button type="submit">Update Support Ticket</button>
-                </form>
-              </article>
-              '''
-              for ticket in support
-          ) or '<p>No support tickets in the inbox.</p>'}
-        </div>
-      </section>
     </section>
-    <section class="panel">
-      <h2>Registration Help Requests</h2>
-      <div class="order-card-grid">
-        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(request['email'])}</span><h3>{html.escape(request['name'])}</h3></div><span class='menu-count'>{html.escape(request['status'])}</span></div><div class='reason-box'>{html.escape(request['issue'])}</div><form method='post' action='/guest-help/update' class='action-stack'><input type='hidden' name='request_id' value='{request['id']}'><label>Status<select name='status'><option value='OPEN'>Open</option><option value='REVIEWED'>Reviewed</option><option value='CLOSED'>Closed</option></select></label><label>Response Note<textarea name='response_note' placeholder='Internal follow-up or response summary'></textarea></label><button type='submit'>Update Request</button></form></article>" for request in guest_help) or '<p>No registration help requests yet.</p>'}
-      </div>
-    </section>
-    <section class="panel">
-      <h2>Account Activity Log</h2>
-      <div class="order-card-grid">
-        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(log['actor_role'] or 'System')}</span><h3>{html.escape(log['actor_name'] or 'System')}</h3></div><span class='menu-count'>{html.escape(log['created_at'])}</span></div><div class='order-meta'><span>Action: {html.escape(log['action'])}</span><span>Target: {html.escape(log['target_user_name'] or 'N/A')}</span></div><div class='reason-box'>{html.escape(log['details'] or 'No extra details provided.')}</div></article>" for log in activity_logs) or '<p>No activity logged yet.</p>'}
-      </div>
-    </section>
+    {engineer_sections}
     """
-    return page("Admin Tools", body, user=user, message=message, level=level)
+    return page(title, body, user=user, message=message, level=level)
 
 
 def render_helpdesk_dashboard(connection, user, message=None, level="info"):
+    if user["role"] == "helpdesk":
+        return render_admin_dashboard(connection, user, message, level)
     tickets = support_rows(connection, "WHERE support_tickets.user_id = ? OR support_tickets.opened_by = ?", (user["id"], user["id"]))
     message_map = support_messages_map(connection, [ticket["id"] for ticket in tickets])
     cards = []
