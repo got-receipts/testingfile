@@ -34,6 +34,10 @@ a {
   text-decoration: none;
 }
 
+.is-hidden {
+  display: none !important;
+}
+
 .site-header {
   display: flex;
   justify-content: space-between;

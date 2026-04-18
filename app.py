@@ -511,25 +511,23 @@ def active_store_note(category):
     return MENU_SECTION_NOTES.get(category, "Live inventory available now.")
 
 
-def render_store_chip(label, url, active=False):
+def render_store_chip(label, url, active=False, kind="category"):
     class_name = "filter-chip active" if active else "filter-chip"
-    return f'<a class="{class_name}" href="{html.escape(url)}">{html.escape(label)}</a>'
+    return f'<button type="button" class="{class_name}" data-filter-kind="{html.escape(kind)}" data-filter-value="{html.escape(label)}">{html.escape(label)}</button>'
 
 
 def render_store_search(filters):
     return f"""
-    <form method="get" action="/" class="store-search">
-      <input type="hidden" name="category" value="{html.escape(filters['category'])}">
-      <input type="hidden" name="strain" value="{html.escape(filters['strain'])}">
+    <div class="store-search">
       <label class="search-label">
         <span class="eyebrow">Search by Name</span>
-        <input type="search" name="search" value="{html.escape(filters['search'])}" placeholder="Search flower, concentrates, syrup...">
+        <input type="search" name="search" value="{html.escape(filters['search'])}" placeholder="Search flower, concentrates, syrup..." id="store-search-input">
       </label>
       <div class="card-buttons">
-        <button type="submit">Search</button>
-        <a class="button ghost" href="{store_url()}">Clear</a>
+        <button type="button" id="store-search-button">Search</button>
+        <button type="button" class="button ghost" id="store-clear-button">Clear</button>
       </div>
-    </form>
+    </div>
     """
 
 
@@ -1070,6 +1068,25 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (issued_by) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS user_stats (
+                user_id INTEGER PRIMARY KEY,
+                hourly_rate REAL NOT NULL DEFAULT 0,
+                total_trips INTEGER NOT NULL DEFAULT 0,
+                total_orders_picked INTEGER NOT NULL DEFAULT 0,
+                total_orders_dispatched INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS time_clock_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                clock_in_at TEXT NOT NULL,
+                clock_out_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             """
         )
         ensure_column(connection, "users", "account_state TEXT NOT NULL DEFAULT 'ACTIVE'")
@@ -1099,6 +1116,7 @@ def init_db():
 
         seed_leafly_strains(connection)
         seed_defaults(connection)
+        seed_user_stats(connection)
         if not CLEANUP_DONE:
             cleanup_generated_tickets(connection)
             CLEANUP_DONE = True
@@ -1133,6 +1151,18 @@ def seed_defaults(connection):
         )
 
     sync_launch_menu(connection)
+
+
+def seed_user_stats(connection):
+    for user in connection.execute("SELECT id FROM users").fetchall():
+        connection.execute(
+            """
+            INSERT INTO user_stats (user_id, updated_at)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            (user["id"], now_iso()),
+        )
 
 
 def cleanup_generated_tickets(connection):
@@ -1452,6 +1482,106 @@ def coupon_rows(connection, where_clause="", params=()):
     ).fetchall()
 
 
+def user_stats_map(connection):
+    rows = connection.execute("SELECT * FROM user_stats").fetchall()
+    return {row["user_id"]: row for row in rows}
+
+
+def ensure_user_stats_row(connection, user_id):
+    connection.execute(
+        """
+        INSERT INTO user_stats (user_id, updated_at)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO NOTHING
+        """,
+        (user_id, now_iso()),
+    )
+
+
+def increment_user_stat(connection, user_id, column_name, amount=1):
+    ensure_user_stats_row(connection, user_id)
+    connection.execute(
+        f"UPDATE user_stats SET {column_name} = COALESCE({column_name}, 0) + ?, updated_at = ? WHERE user_id = ?",
+        (amount, now_iso(), user_id),
+    )
+
+
+def active_time_clock_entry(connection, user_id):
+    return connection.execute(
+        """
+        SELECT *
+        FROM time_clock_entries
+        WHERE user_id = ? AND clock_out_at IS NULL
+        ORDER BY clock_in_at DESC, id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+
+
+def time_clock_summary(connection, user_id):
+    entries = connection.execute(
+        """
+        SELECT *
+        FROM time_clock_entries
+        WHERE user_id = ?
+        ORDER BY clock_in_at DESC, id DESC
+        LIMIT 20
+        """,
+        (user_id,),
+    ).fetchall()
+    weekly_hours = connection.execute(
+        """
+        SELECT COALESCE(SUM((julianday(COALESCE(clock_out_at, CURRENT_TIMESTAMP)) - julianday(clock_in_at)) * 24), 0) AS hours
+        FROM time_clock_entries
+        WHERE user_id = ? AND clock_in_at >= datetime('now', '-7 days')
+        """,
+        (user_id,),
+    ).fetchone()["hours"]
+    return entries, weekly_hours or 0
+
+
+def personal_activity_rows(connection, user_id, limit=12):
+    return activity_log_rows(
+        connection,
+        "WHERE activity_logs.actor_id = ? OR activity_logs.target_user_id = ?",
+        (user_id, user_id),
+        trailing_clause=f"LIMIT {int(limit)}",
+    )
+
+
+def delivered_sales_sum(connection, modifier):
+    row = connection.execute(
+        f"""
+        SELECT COALESCE(SUM(
+            COALESCE(total_amount, 0) - COALESCE(discount_amount, 0) - COALESCE(credit_applied, 0)
+        ), 0) AS total
+        FROM (
+            SELECT tickets.id,
+                   COALESCE(SUM(ticket_items.quantity * ticket_items.locked_price), 0) AS total_amount,
+                   tickets.discount_amount AS discount_amount,
+                   tickets.credit_applied AS credit_applied,
+                   tickets.updated_at AS updated_at
+            FROM tickets
+            LEFT JOIN ticket_items ON ticket_items.ticket_id = tickets.id
+            WHERE tickets.status = 'DELIVERED'
+            GROUP BY tickets.id
+        ) delivered
+        WHERE delivered.updated_at >= datetime('now', ?)
+        """,
+        (modifier,),
+    ).fetchone()
+    return row["total"] if row else 0
+
+
+def finance_snapshot(connection):
+    return {
+        "day": delivered_sales_sum(connection, "-1 day"),
+        "week": delivered_sales_sum(connection, "-7 days"),
+        "month": delivered_sales_sum(connection, "-30 days"),
+    }
+
+
 def normalize_coupon_code(code):
     return (code or "").strip().upper()
 
@@ -1567,6 +1697,67 @@ def render_credit_issue_panel(connection):
         <label>Note<textarea name="note" required placeholder="Why are you adding credits?"></textarea></label>
         <button type="submit">Issue Credits</button>
       </form>
+    </section>
+    """
+
+
+def render_activity_list(connection, user_id, title="Recent Activity", limit=8):
+    rows = personal_activity_rows(connection, user_id, limit)
+    return f"""
+    <section class="panel">
+      <h2>{html.escape(title)}</h2>
+      <div class="order-card-grid">
+        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(row['actor_role'] or 'System')}</span><h3>{html.escape(row['action'])}</h3></div><span class='menu-count'>{html.escape(row['created_at'])}</span></div><div class='reason-box'>{html.escape(row['details'] or 'No extra details provided.')}</div></article>" for row in rows) or '<p>No activity logged yet.</p>'}
+      </div>
+    </section>
+    """
+
+
+def render_staff_clock_panel(connection, user):
+    if user["role"] == "client":
+        return ""
+    active_entry = active_time_clock_entry(connection, user["id"])
+    entries, weekly_hours = time_clock_summary(connection, user["id"])
+    latest_rows = "".join(
+        f"<div class='item-pill'><strong>{html.escape(entry['clock_in_at'])}</strong><span>{html.escape(entry['clock_out_at'] or 'Clocked in now')}</span></div>"
+        for entry in entries[:5]
+    ) or "<p>No time entries yet.</p>"
+    action = "clock_out" if active_entry else "clock_in"
+    button_label = "Clock Out" if active_entry else "Clock In"
+    status_note = (
+        f"<div class='tracker-note'>Active shift started at {html.escape(active_entry['clock_in_at'])}.</div>"
+        if active_entry
+        else "<div class='tracker-note'>You are currently clocked out.</div>"
+    )
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Time Clock</h2>
+        <form method="post" action="/clock" class="inline-form">
+          <input type="hidden" name="action" value="{action}">
+          <button type="submit">{button_label}</button>
+        </form>
+      </div>
+      <div class="checkout-total"><span>Hours in last 7 days</span><strong>{weekly_hours:.2f}</strong></div>
+      {status_note}
+      <div class="item-pill-list">{latest_rows}</div>
+    </section>
+    """
+
+
+def render_account_stats_panel(connection, user):
+    stats = user_stats_map(connection).get(user["id"])
+    ensure_user_stats_row(connection, user["id"])
+    stats = user_stats_map(connection).get(user["id"])
+    delivered_count = connection.execute("SELECT COUNT(*) AS count FROM tickets WHERE driver_id = ? AND status = 'DELIVERED'", (user["id"],)).fetchone()["count"] if user["role"] == "driver" else 0
+    picked_count = connection.execute("SELECT COUNT(*) AS count FROM tickets WHERE picker_id = ? AND status IN ('READY_FOR_DISPATCH', 'READY_FOR_PICKUP', 'DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY', 'DELIVERED')", (user["id"],)).fetchone()["count"] if user["role"] == "picker" else 0
+    dispatched_count = connection.execute("SELECT COUNT(*) AS count FROM tickets WHERE dispatcher_id = ? AND status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'READY_FOR_PICKUP')", (user["id"],)).fetchone()["count"] if user["role"] == "dispatcher" else 0
+    return f"""
+    <section class="stats-row">
+      <div class="stat-card"><span>Hourly Rate</span><strong>{format_money((stats['hourly_rate'] if stats else 0) or 0)}</strong></div>
+      <div class="stat-card"><span>Total Trips</span><strong>{(stats['total_trips'] if stats else 0) or delivered_count}</strong></div>
+      <div class="stat-card"><span>Orders Picked</span><strong>{(stats['total_orders_picked'] if stats else 0) or picked_count}</strong></div>
+      <div class="stat-card"><span>Orders Dispatched</span><strong>{(stats['total_orders_dispatched'] if stats else 0) or dispatched_count}</strong></div>
     </section>
     """
 
@@ -1787,19 +1978,19 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         """
     ).fetchall()
     cart_count = client_cart_count(connection, user["id"]) if user and user["role"] == "client" else 0
-    visible_products = []
-    for product in products:
-        if filters["category"] != "All" and product["category"] != filters["category"]:
-            continue
-        if filters["category"] in {"Flower", "Concentrates"} and filters["strain"] != "All":
-            if normalize_strain_type(product["strain_type"] or "Unspecified") != filters["strain"]:
-                continue
-        if filters["search"] and filters["search"].lower() not in str(product["name"]).lower():
-            continue
-        visible_products.append(product)
-
     cards = []
-    for product in visible_products:
+    visible_products = 0
+    for product in products:
+        product_strain = normalize_strain_type(product["strain_type"] or "Unspecified")
+        matches_filters = True
+        if filters["category"] != "All" and product["category"] != filters["category"]:
+            matches_filters = False
+        if filters["category"] in {"Flower", "Concentrates"} and filters["strain"] != "All" and product_strain != filters["strain"]:
+            matches_filters = False
+        if filters["search"] and filters["search"].lower() not in str(product["name"]).lower():
+            matches_filters = False
+        if matches_filters:
+            visible_products += 1
         action = "<a class='button' href='/login'>Login to Order</a>"
         if user and user["role"] == "client":
             action = f"""
@@ -1820,14 +2011,14 @@ def render_store_page(connection, user=None, message=None, level="info", filters
             card_label = "Flower | Double Stuffed 7G"
         cards.append(
             f"""
-            <article class="product-card">
+            <article class="product-card{' is-hidden' if not matches_filters else ''}" data-category="{html.escape(product['category'])}" data-strain="{html.escape(product_strain)}" data-name="{html.escape(str(product['name']).lower())}">
               {f'<img class="product-card-image" src="{html.escape(product["image_url"])}" alt="{html.escape(product["name"])}">' if product["image_url"] else ""}
               <div class="product-card-top">
                 <span class="eyebrow">{html.escape(card_label)} | In Stock: {product["stock"]}</span>
                 <h3>{html.escape(product["name"])}</h3>
                 <div class="product-meta-pills">
                   <span class="price-pill">{format_money(product["price"])}</span>
-                  {f"<span class='strain-pill'>{html.escape(normalize_strain_type(product['strain_type'] or 'Unspecified'))}</span>" if product["category"] in {"Flower", "Concentrates"} else ""}
+                  {f"<span class='strain-pill'>{html.escape(product_strain)}</span>" if product["category"] in {"Flower", "Concentrates"} else ""}
                   {f"<span class='strain-pill'>{html.escape(product['menu_group'])}</span>" if product["menu_group"] else ""}
                 </div>
               </div>
@@ -1839,19 +2030,17 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         )
 
     category_chips = "".join(
-        render_store_chip(option, store_url(filters, category=option, strain="All"), active=filters["category"] == option)
+        render_store_chip(option, store_url(filters, category=option, strain="All"), active=filters["category"] == option, kind="category")
         for option in STORE_CATEGORY_OPTIONS
     )
-    strain_controls = ""
-    if filters["category"] in {"Flower", "Concentrates"}:
-        strain_controls = f"""
-        <div class="filter-row">
-          <span class="eyebrow">Strain Filter</span>
-          <div class="filter-chip-row">
-            {''.join(render_store_chip(option, store_url(filters, strain=option), active=filters["strain"] == option) for option in STRAIN_FILTER_OPTIONS)}
-          </div>
-        </div>
-        """
+    strain_controls = f"""
+    <div class="filter-row{' is-hidden' if filters['category'] not in {'Flower', 'Concentrates'} else ''}" id="strain-filter-row">
+      <span class="eyebrow">Strain Filter</span>
+      <div class="filter-chip-row">
+        {''.join(render_store_chip(option, store_url(filters, strain=option), active=filters["strain"] == option, kind="strain") for option in STRAIN_FILTER_OPTIONS)}
+      </div>
+    </div>
+    """
 
     body = f"""
     <section class="hero">
@@ -1891,7 +2080,7 @@ def render_store_page(connection, user=None, message=None, level="info", filters
               <span class="eyebrow">Browse 518 Submenus</span>
               <h3>{html.escape(filters["category"] if filters["category"] != "All" else "All Menu Items")}</h3>
             </div>
-            <span class="menu-count">{len(visible_products)} matches</span>
+            <span class="menu-count" id="menu-match-count">{visible_products} matches</span>
           </div>
           <p class="menu-note">{html.escape(active_store_note(filters["category"]))}</p>
           <div class="filter-row">
@@ -1900,11 +2089,102 @@ def render_store_page(connection, user=None, message=None, level="info", filters
           </div>
           {strain_controls}
           {render_store_search(filters)}
-          <div class="product-grid">{''.join(cards) if cards else "<p>No menu items match that search or filter yet.</p>"}</div>
+          <div class="product-grid" id="store-product-grid">{''.join(cards) if cards else "<p>No menu items match that search or filter yet.</p>"}</div>
         </section>
       </div>
       {render_cart_widget(connection, user, filters)}
     </section>
+    <script>
+      (function () {{
+        var state = {{
+          category: {filters["category"]!r},
+          strain: {filters["strain"]!r},
+          search: {filters["search"]!r}
+        }};
+        var cards = Array.prototype.slice.call(document.querySelectorAll('.product-card[data-category]'));
+        var countNode = document.getElementById('menu-match-count');
+        var searchInput = document.getElementById('store-search-input');
+        var clearButton = document.getElementById('store-clear-button');
+        var searchButton = document.getElementById('store-search-button');
+        var strainRow = document.getElementById('strain-filter-row');
+        function applyFilters() {{
+          var visible = 0;
+          if (strainRow) {{
+            strainRow.classList.toggle('is-hidden', state.category !== 'Flower' && state.category !== 'Concentrates');
+          }}
+          cards.forEach(function (card) {{
+            var category = card.dataset.category || 'General';
+            var strain = card.dataset.strain || 'Unspecified';
+            var name = card.dataset.name || '';
+            var matches = true;
+            if (state.category !== 'All' && category !== state.category) {{
+              matches = false;
+            }}
+            if (state.category !== 'Flower' && state.category !== 'Concentrates') {{
+              state.strain = 'All';
+            }}
+            if (state.strain !== 'All' && strain !== state.strain) {{
+              matches = false;
+            }}
+            if (state.search && name.indexOf(state.search.toLowerCase()) === -1) {{
+              matches = false;
+            }}
+            card.classList.toggle('is-hidden', !matches);
+            if (matches) {{
+              visible += 1;
+            }}
+          }});
+          if (countNode) {{
+            countNode.textContent = visible + ' matches';
+          }}
+          document.querySelectorAll('[data-filter-kind=\"category\"]').forEach(function (chip) {{
+            chip.classList.toggle('active', chip.dataset.filterValue === state.category);
+          }});
+          document.querySelectorAll('[data-filter-kind=\"strain\"]').forEach(function (chip) {{
+            chip.classList.toggle('active', chip.dataset.filterValue === state.strain);
+          }});
+        }}
+        document.querySelectorAll('[data-filter-kind=\"category\"]').forEach(function (chip) {{
+          chip.addEventListener('click', function () {{
+            state.category = chip.dataset.filterValue;
+            if (state.category !== 'Flower' && state.category !== 'Concentrates') {{
+              state.strain = 'All';
+            }}
+            applyFilters();
+          }});
+        }});
+        document.querySelectorAll('[data-filter-kind=\"strain\"]').forEach(function (chip) {{
+          chip.addEventListener('click', function () {{
+            state.strain = chip.dataset.filterValue;
+            applyFilters();
+          }});
+        }});
+        if (searchButton) {{
+          searchButton.addEventListener('click', function () {{
+            state.search = searchInput ? searchInput.value.trim() : '';
+            applyFilters();
+          }});
+        }}
+        if (searchInput) {{
+          searchInput.addEventListener('input', function () {{
+            state.search = searchInput.value.trim();
+            applyFilters();
+          }});
+        }}
+        if (clearButton) {{
+          clearButton.addEventListener('click', function () {{
+            state.category = 'All';
+            state.strain = 'All';
+            state.search = '';
+            if (searchInput) {{
+              searchInput.value = '';
+            }}
+            applyFilters();
+          }});
+        }}
+        applyFilters();
+      }})();
+    </script>
     """
     return page(APP_NAME, body, user=user, message=message, level=level, cart_count=cart_count)
 
@@ -2011,6 +2291,7 @@ def render_client_dashboard(connection, user, message=None, level="info"):
       </div>
       <div class="order-card-grid">{''.join(cards) if cards else '<p>No orders yet.</p>'}</div>
     </section>
+    {render_activity_list(connection, user["id"], title="Your Account Activity")}
     """
     return page("Customer Dashboard", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]), auto_refresh=True)
 
@@ -2117,12 +2398,15 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
             """
         )
     body = f"""
+    {render_account_stats_panel(connection, user)}
+    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Waiting for Verification</span><strong>{sum(1 for ticket in tickets if ticket['payment_status'] == 'PENDING' and ticket['status'] not in {'CANCELED', 'DELIVERED'})}</strong></div>
       <div class="stat-card"><span>Tickets on Desk</span><strong>{len(tickets)}</strong></div>
     </section>
     <section class="panel"><h2>In-House Bank</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No payment reviews waiting.</p>'}</div></section>
     {render_credit_issue_panel(connection)}
+    {render_activity_list(connection, user["id"], title="Your Banking Activity")}
     """
     return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
@@ -2280,6 +2564,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
             """
         )
     body = f"""
+    {render_account_stats_panel(connection, user)}
+    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Ready for Driver</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'READY_FOR_DISPATCH')}</strong></div>
       <div class="stat-card"><span>Open Blocks</span><strong>{sum(1 for block in blocks if block['status'] == 'OPEN')}</strong></div>
@@ -2316,6 +2602,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     <section class="panel"><h2>Dispatch Blocks</h2><div class="order-card-grid">{''.join(block_cards) if block_cards else '<p>No blocks created yet.</p>'}</div></section>
     <section class="panel"><h2>Dispatch Board</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No dispatch work waiting.</p>'}</div></section>
     {render_credit_issue_panel(connection)}
+    {render_activity_list(connection, user["id"], title="Your Dispatch Activity")}
     """
     return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
@@ -2362,11 +2649,14 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
             """
         )
     body = f"""
+    {render_account_stats_panel(connection, user)}
+    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Ready to Pack</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'PACKING')}</strong></div>
       <div class="stat-card"><span>Visible Tickets</span><strong>{len(tickets)}</strong></div>
     </section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
+    {render_activity_list(connection, user["id"], title="Your Picking Activity")}
     """
     return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
@@ -2447,24 +2737,33 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
             """
         )
     body = f"""
+    {render_account_stats_panel(connection, user)}
+    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Assigned Blocks</span><strong>{len(block_names)}</strong></div>
       <div class="stat-card"><span>Assigned Routes</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'DRIVER_ASSIGNED')}</strong></div>
       <div class="stat-card"><span>Live Deliveries</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'OUT_FOR_DELIVERY')}</strong></div>
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
+    {render_activity_list(connection, user["id"], title="Your Driver Activity")}
     """
     return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_admin_home(connection, user, message=None, level="info"):
     title = "Engineer Dashboard" if user["role"] == "helpdesk" else "Admin Dashboard"
+    finance = finance_snapshot(connection)
     body = f"""
+    {render_account_stats_panel(connection, user)}
+    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]}</strong></div>
       <div class="stat-card"><span>Menu Items</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM products").fetchone()["count"]}</strong></div>
       <div class="stat-card"><span>Budhub Tickets</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM tickets").fetchone()["count"]}</strong></div>
       <div class="stat-card"><span>Open Bag Lines</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM cart_items").fetchone()["count"]}</strong></div>
+      <div class="stat-card"><span>Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
+      <div class="stat-card"><span>Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
+      <div class="stat-card"><span>Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
     </section>
     <section class="admin-grid">
       <section class="panel">
@@ -2474,6 +2773,7 @@ def render_admin_home(connection, user, message=None, level="info"):
       </section>
       <section class="panel"><span class="eyebrow">Flow</span><h2>Bank verifies first, dispatch assigns drivers</h2><p>The workflow now follows the same order every time.</p></section>
     </section>
+    {render_activity_list(connection, user["id"], title="Your Admin Activity")}
     """
     return page(title, body, user=user, message=message, level=level, auto_refresh=True)
 
@@ -2488,6 +2788,8 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     coupons = coupon_rows(connection)
     leafly_strains = leafly_strain_rows(connection)
     guest_help = guest_help_rows(connection)
+    user_stats = user_stats_map(connection)
+    finance = finance_snapshot(connection)
     verification_queue = connection.execute(
         """
         SELECT * FROM users
@@ -2561,12 +2863,25 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     </section>
         """
     body = f"""
+    {render_account_stats_panel(connection, user)}
+    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{len(users)}</strong></div>
       <div class="stat-card"><span>Menu Items</span><strong>{len(products)}</strong></div>
       <div class="stat-card"><span>Budhub Tickets</span><strong>{len(tickets)}</strong></div>
       <div class="stat-card"><span>ID Reviews</span><strong>{len(verification_queue)}</strong></div>
+      <div class="stat-card"><span>Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
+      <div class="stat-card"><span>Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
+      <div class="stat-card"><span>Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
       {engineer_stats}
+    </section>
+    <section class="panel">
+      <h2>Finance Tracker</h2>
+      <div class="stats-row">
+        <div class="stat-card"><span>Delivered Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
+        <div class="stat-card"><span>Delivered Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
+        <div class="stat-card"><span>Delivered Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
+      </div>
     </section>
     <section class="admin-grid">
       <section class="panel">
@@ -2695,6 +3010,37 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
           ) or '<p>No accounts available.</p>'}
         </div>
       </section>
+    </section>
+    <section class="panel">
+      <h2>Account Statistics and Payroll</h2>
+      <div class="order-card-grid">
+        {''.join(
+            f"""
+            <article class='order-card'>
+              <div class='order-card-head'>
+                <div><span class='eyebrow'>{html.escape(account['email'])}</span><h3>{html.escape(account['name'])}</h3></div>
+                <span class='menu-count'>{html.escape(ROLE_LABELS.get(account['role'], account['role']))}</span>
+              </div>
+              <div class='order-meta'>
+                <span>Hourly Rate: {format_money((user_stats.get(account['id'])['hourly_rate'] if user_stats.get(account['id']) else 0) or 0)}</span>
+                <span>Total Trips: {(user_stats.get(account['id'])['total_trips'] if user_stats.get(account['id']) else 0) or 0}</span>
+                <span>Orders Picked: {(user_stats.get(account['id'])['total_orders_picked'] if user_stats.get(account['id']) else 0) or 0}</span>
+                <span>Orders Dispatched: {(user_stats.get(account['id'])['total_orders_dispatched'] if user_stats.get(account['id']) else 0) or 0}</span>
+              </div>
+              <form method='post' action='/users/stats-update' class='form-grid'>
+                <input type='hidden' name='user_id' value='{account['id']}'>
+                <label>Hourly Rate<input type='number' name='hourly_rate' min='0' step='0.01' value='{(user_stats.get(account['id'])['hourly_rate'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                <label>Total Trips<input type='number' name='total_trips' min='0' value='{(user_stats.get(account['id'])['total_trips'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                <label>Total Orders Picked<input type='number' name='total_orders_picked' min='0' value='{(user_stats.get(account['id'])['total_orders_picked'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                <label>Total Orders Dispatched<input type='number' name='total_orders_dispatched' min='0' value='{(user_stats.get(account['id'])['total_orders_dispatched'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                <button type='submit'>Update Pay and Stats</button>
+              </form>
+              {render_activity_list(connection, account["id"], title="Account Activity", limit=4)}
+            </article>
+            """
+            for account in users
+        ) or '<p>No account statistics available.</p>'}
+      </div>
     </section>
     {engineer_sections}
     """
@@ -3174,6 +3520,7 @@ def handle_update_order(environ, start_response, connection, user):
     if user["role"] == "banker":
         if action == "verify_payment" and ticket["payment_status"] == "PENDING" and ticket["status"] not in {"CANCELED", "DELIVERED"}:
             update_ticket(connection, ticket_id, payment_status="VERIFIED", banker_id=user["id"])
+            log_activity(connection, user, "VERIFY_PAYMENT", f"Verified payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Payment verified")
         return redirect(start_response, "/dashboard?message=That bank action is not allowed")
@@ -3199,6 +3546,8 @@ def handle_update_order(environ, start_response, connection, user):
         if action == "pack_order" and ticket["status"] == "PACKING":
             next_status = "READY_FOR_PICKUP" if ticket["fulfillment_type"] == "PICKUP" else "READY_FOR_DISPATCH"
             update_ticket(connection, ticket_id, status=next_status, picker_id=user["id"], review_reason=None)
+            increment_user_stat(connection, user["id"], "total_orders_picked", 1)
+            log_activity(connection, user, "PACK_ORDER", f"Packed ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Packed and returned to dispatch")
         if action == "send_review" and ticket["status"] == "PACKING":
@@ -3216,6 +3565,8 @@ def handle_update_order(environ, start_response, connection, user):
             if ticket["payment_status"] != "VERIFIED":
                 return redirect(start_response, "/dashboard?message=Pickup cannot be completed until payment is verified")
             update_ticket(connection, ticket_id, status="DELIVERED", dispatcher_id=user["id"], internal_note="Customer picked up in person.")
+            increment_user_stat(connection, user["id"], "total_orders_dispatched", 1)
+            log_activity(connection, user, "COMPLETE_PICKUP", f"Completed pickup for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Pickup completed")
         if action == "create_block_for_ticket" and ticket["status"] == "READY_FOR_DISPATCH":
@@ -3268,6 +3619,8 @@ def handle_update_order(environ, start_response, connection, user):
                     dispatcher_id=user["id"],
                     internal_note=f"Submitted in {block_name}",
                 )
+            increment_user_stat(connection, user["id"], "total_orders_dispatched", len(block_tickets))
+            log_activity(connection, user, "SUBMIT_BLOCK", f"Submitted block {block_name} with {len(block_tickets)} tickets to driver {driver['name']}.")
             connection.commit()
             return redirect(start_response, "/dashboard?message=Block submitted to driver")
         if action == "pull_back" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
@@ -3338,12 +3691,15 @@ def handle_update_order(environ, start_response, connection, user):
             return redirect(start_response, f"/dashboard?message={meta['driver_message']}")
         if action == "start_route" and ticket["status"] == "DRIVER_ASSIGNED":
             update_ticket(connection, ticket_id, status="OUT_FOR_DELIVERY")
+            log_activity(connection, user, "START_ROUTE", f"Started route for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Route started")
         if action == "deliver_order" and ticket["status"] == "OUT_FOR_DELIVERY":
             if ticket["payment_status"] != "VERIFIED":
                 return redirect(start_response, "/dashboard?message=Delivery cannot be completed until the bank verifies payment")
             update_ticket(connection, ticket_id, status="DELIVERED")
+            increment_user_stat(connection, user["id"], "total_trips", 1)
+            log_activity(connection, user, "DELIVER_ORDER", f"Delivered ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
             return redirect(start_response, "/dashboard?message=Delivery completed")
         return redirect(start_response, "/dashboard?message=That driver action is not allowed")
@@ -3382,6 +3738,68 @@ def handle_update_user_account(environ, start_response, connection, user):
     connection.commit()
     message = "Account updated and support ticket created" if account_state in {"LOCKED", "SUSPENDED", "BANNED"} else "Account returned to active status"
     return redirect(start_response, f"/admin?message={message}")
+
+
+def handle_clock_action(environ, start_response, connection, user):
+    gate = require_user(start_response, user)
+    if gate:
+        return gate
+    if user["role"] == "client":
+        return redirect(start_response, "/dashboard?message=Customers do not use the staff time clock")
+    data = read_post_data(environ)
+    action = data.get("action", "")
+    active_entry = active_time_clock_entry(connection, user["id"])
+    if action == "clock_in":
+        if active_entry:
+            return redirect(start_response, "/dashboard?message=You are already clocked in")
+        connection.execute(
+            "INSERT INTO time_clock_entries (user_id, clock_in_at, created_at) VALUES (?, ?, ?)",
+            (user["id"], now_iso(), now_iso()),
+        )
+        log_activity(connection, user, "CLOCK_IN", "Clocked into the BudHub shift tracker.", target_user_id=user["id"])
+        connection.commit()
+        return redirect(start_response, "/dashboard?message=Clocked in")
+    if action == "clock_out":
+        if not active_entry:
+            return redirect(start_response, "/dashboard?message=You are not clocked in")
+        connection.execute(
+            "UPDATE time_clock_entries SET clock_out_at = ? WHERE id = ?",
+            (now_iso(), active_entry["id"]),
+        )
+        log_activity(connection, user, "CLOCK_OUT", "Clocked out of the BudHub shift tracker.", target_user_id=user["id"])
+        connection.commit()
+        return redirect(start_response, "/dashboard?message=Clocked out")
+    return redirect(start_response, "/dashboard?message=Unknown clock action")
+
+
+def handle_update_user_stats(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    target_id = int(data.get("user_id", "0"))
+    target = connection.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
+    if not target:
+        return redirect(start_response, "/admin?message=Account not found")
+    ensure_user_stats_row(connection, target_id)
+    connection.execute(
+        """
+        UPDATE user_stats
+        SET hourly_rate = ?, total_trips = ?, total_orders_picked = ?, total_orders_dispatched = ?, updated_at = ?
+        WHERE user_id = ?
+        """,
+        (
+            float(data.get("hourly_rate", "0") or 0),
+            int(data.get("total_trips", "0") or 0),
+            int(data.get("total_orders_picked", "0") or 0),
+            int(data.get("total_orders_dispatched", "0") or 0),
+            now_iso(),
+            target_id,
+        ),
+    )
+    log_activity(connection, user, "UPDATE_USER_STATS", f"Updated payroll and stats for {target['email']}.", target_user_id=target_id)
+    connection.commit()
+    return redirect(start_response, "/admin?message=Account statistics updated")
 
 
 def handle_update_support_ticket(environ, start_response, connection, user):
@@ -3547,6 +3965,8 @@ def application(environ, start_response):
             return handle_remove_from_cart(environ, start_response, connection, user)
         if path == "/cart/checkout" and method == "POST":
             return handle_cart_checkout(environ, start_response, connection, user)
+        if path == "/clock" and method == "POST":
+            return handle_clock_action(environ, start_response, connection, user)
         if path == "/products/create" and method == "POST":
             return handle_create_product(environ, start_response, connection, user)
         if path == "/coupons/create" and method == "POST":
@@ -3557,6 +3977,8 @@ def application(environ, start_response):
             return handle_create_user(environ, start_response, connection, user)
         if path == "/users/update" and method == "POST":
             return handle_update_user_account(environ, start_response, connection, user)
+        if path == "/users/stats-update" and method == "POST":
+            return handle_update_user_stats(environ, start_response, connection, user)
         if path == "/users/verify" and method == "POST":
             return handle_user_verification(environ, start_response, connection, user)
         if path == "/support/create" and method == "POST":
