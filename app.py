@@ -51,14 +51,14 @@ LAUNCH_MENU = [
         "stock": 10,
     },
     {
-        "name": "LJA OZ",
+        "name": "Blue Dream OZ",
         "category": "Flower",
         "description": "Full ounce flower option.",
         "price": 100.50,
         "stock": 8,
     },
     {
-        "name": "Mendo Berries DS 7G",
+        "name": "Blue Dream DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $15.50.",
         "price": 15.50,
@@ -72,7 +72,7 @@ LAUNCH_MENU = [
         "stock": 10,
     },
     {
-        "name": "Cherry Crushers DS 7G",
+        "name": "Gelato DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $15.50.",
         "price": 15.50,
@@ -102,7 +102,7 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/la-confidential",
     },
     {
-        "name": "Candy Fumes DS 7G",
+        "name": "Wedding Cake DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
@@ -118,21 +118,21 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/sour-diesel",
     },
     {
-        "name": "Strawberry Gumbo DS 7G",
+        "name": "Mimosa DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
         "stock": 10,
     },
     {
-        "name": "Blue Nerds DS 7G",
+        "name": "Biscotti DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
         "stock": 10,
     },
     {
-        "name": "Sweet Exotic Candy DS 7G",
+        "name": "Ice Cream Cake DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
@@ -146,7 +146,7 @@ LAUNCH_MENU = [
         "stock": 10,
     },
     {
-        "name": "Lollipops DS 7G",
+        "name": "Jack Herer DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
@@ -178,7 +178,7 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/sundae-driver",
     },
     {
-        "name": "Cinnamon Roll Runtz DS 7G",
+        "name": "Northern Lights DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $30.50.",
         "price": 30.50,
@@ -194,7 +194,7 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/animal-mints",
     },
     {
-        "name": "Maui Gushers DS 7G",
+        "name": "White Widow DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $30.50.",
         "price": 30.50,
@@ -208,7 +208,7 @@ LAUNCH_MENU = [
         "stock": 8,
     },
     {
-        "name": "Frozen Pink Runtz DS 7G",
+        "name": "Mimosa DS 7G Reserve",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
         "price": 35.50,
@@ -224,7 +224,7 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/pineapple-express",
     },
     {
-        "name": "Obama Runtz DS 7G",
+        "name": "OG Kush DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
         "price": 35.50,
@@ -240,14 +240,14 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/purple-haze",
     },
     {
-        "name": "Newyork Gumbo DS 7G",
+        "name": "Durban Poison DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $35.50. Low stock batch.",
         "price": 35.50,
         "stock": 4,
     },
     {
-        "name": "Pineapple Snot DS 7G",
+        "name": "Biscotti DS 7G Reserve",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
         "price": 35.50,
@@ -261,28 +261,28 @@ LAUNCH_MENU = [
         "stock": 8,
     },
     {
-        "name": "Rage Bait DS 7G",
+        "name": "Gelatti DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
         "price": 40.50,
         "stock": 6,
     },
     {
-        "name": "Sour Apple Gelato DS 7G",
+        "name": "Wedding Cake DS 7G Reserve",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
         "price": 40.50,
         "stock": 6,
     },
     {
-        "name": "Gladiator Kush DS 7G",
+        "name": "GMO Cookies DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
         "price": 40.50,
         "stock": 6,
     },
     {
-        "name": "Sour Milk DS 7G",
+        "name": "Ice Cream Cake DS 7G Reserve",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $40.50.",
         "price": 40.50,
@@ -298,7 +298,7 @@ LAUNCH_MENU = [
         "source_url": "https://www.leafly.com/strains/super-sour-diesel",
     },
     {
-        "name": "Lung Smacker DS 7G",
+        "name": "OG Kush DS 7G Reserve",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $50.50.",
         "price": 50.50,
@@ -330,19 +330,29 @@ STATUS_LABELS = {
 TRACKER = ["PACKING", "READY_FOR_DISPATCH", "OUT_FOR_DELIVERY", "DELIVERED"]
 BLOCK_SIZE = 5
 LEAFLY_STRAIN_LIBRARY = [
+    {"name": "Blue Dream", "slug": "blue-dream", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/green/strain-3.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Biscotti", "slug": "biscotti", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/orange/strain-2.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Afghan Kush", "slug": "afghan-kush", "type": "Indica", "image_url": "https://images.leafly.com/flower-images/defaults/long-fluffy-wispy/strain-7.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Animal Mints", "slug": "animal-mints", "type": "Hybrid", "image_url": "https://leafly-public.imgix.net/strains/photos/IaYQshrPTxiD2BOWHO1n_AnimalMints.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Blue Nerds", "slug": "blue-nerds", "type": "Hybrid"},
-    {"name": "Candy Fumes", "slug": "brands/cannalicious-labs/products/cannalicious-labs-candy-fumez-crumble-hybrid-solvent", "type": "Hybrid"},
     {"name": "Cotton Candy", "slug": "cotton-candy", "type": "Hybrid"},
+    {"name": "Durban Poison", "slug": "durban-poison", "type": "Sativa", "image_url": "https://images.leafly.com/flower-images/defaults/light-green/strain-9.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Electric Lemon", "slug": "electric-lemon-g", "type": "Sativa"},
     {"name": "Frozen Runtz", "slug": "frozen-runtz", "type": "Hybrid"},
     {"name": "Garlic Breath", "slug": "garlic-breath", "type": "Hybrid"},
+    {"name": "Gelato", "slug": "gelato", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-13.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Gelatti", "slug": "gelatti", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-4.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "GMO Cookies", "slug": "gmo-cookies", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-15.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Gorilla Glue #4", "slug": "original-glue", "type": "Hybrid"},
+    {"name": "Ice Cream Cake", "slug": "ice-cream-cake", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-12.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Jack Herer", "slug": "jack-herer", "type": "Sativa", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-8.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "LA Confidential", "slug": "la-confidential", "type": "Indica", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-5.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Lemon Cherry Gelato", "slug": "lemon-cherry-gelato", "type": "Hybrid"},
     {"name": "Maui Gushers", "slug": "maui-gushers", "type": "Hybrid"},
+    {"name": "Mimosa", "slug": "mimosa", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/orange/strain-16.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Northern Lights", "slug": "northern-lights", "type": "Indica", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-6.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Obama Runtz", "slug": "obama-runtz", "type": "Hybrid"},
+    {"name": "OG Kush", "slug": "og-kush", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/light-green/strain-11.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Pineapple Express", "slug": "pineapple-express", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/pineapple-express.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Pink Mimosas", "slug": "pink-mimosa", "type": "Hybrid"},
     {"name": "Purple Haze", "slug": "purple-haze", "type": "Sativa", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-10.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
@@ -350,6 +360,8 @@ LEAFLY_STRAIN_LIBRARY = [
     {"name": "Strawberry Gumbo", "slug": "strains/strawberry-gum", "type": "Hybrid"},
     {"name": "Sundae Driver", "slug": "sundae-driver", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-17.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
     {"name": "Super Sour Diesel", "slug": "super-sour-diesel", "type": "Sativa", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-22.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Wedding Cake", "slug": "wedding-cake", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-21.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "White Widow", "slug": "white-widow", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/white/strain-14.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
 ]
 
 
@@ -640,6 +652,7 @@ def infer_leafly_reference(connection, product_name):
     cleaned = (
         product_name.replace(" DS 7G", "")
         .replace(" Smalls", "")
+        .replace(" Reserve", "")
         .replace(" OZ", "")
         .strip()
     )

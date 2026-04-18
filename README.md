@@ -21,6 +21,7 @@ Open `http://127.0.0.1:8000`
 ## Demo Accounts
 
 - Admin: `admin@ecommerce.local` / `admin123`
+- Budhub Helpdesk Engineer: `helpdesk@ecommerce.local` / `helpdesk123`
 - Bank: `bank@ecommerce.local` / `bank123`
 - Dispatcher: `dispatcher@ecommerce.local` / `dispatch123`
 - Picker: `picker@ecommerce.local` / `picker123`
