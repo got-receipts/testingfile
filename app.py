@@ -1189,6 +1189,15 @@ def page(title, body, user=None, message=None, level="info", cart_count=0):
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
+  <script>
+    window.setInterval(function () {{
+      var active = document.activeElement;
+      if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) {{
+        return;
+      }}
+      window.location.reload();
+    }}, 2000);
+  </script>
 </head>
 <body>
   <header class="site-header">
@@ -1781,11 +1790,11 @@ def render_store_page(connection, user=None, message=None, level="info", filters
             action = f"""
             <form method="post" action="/cart/add" class="card-action-stack">
               <input type="hidden" name="product_id" value="{product['id']}">
-              <input type="hidden" name="return_to" value="{html.escape(store_url(filters))}">
+              <input type="hidden" name="return_to" value="{html.escape(store_url(filters) + '#bag-widget')}">
               <label class="compact-label">Qty<input type="number" name="quantity" min="1" max="{product['stock']}" value="1" required></label>
               <div class="card-buttons">
                 <button type="submit">Add to Bag</button>
-                <a class="button ghost" href="/order?product_id={product['id']}">Order Now</a>
+                <a class="button ghost" href="/#bag-widget">Open Bag</a>
               </div>
             </form>
             """
@@ -1856,7 +1865,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         <div class="hero-summary">
           <span class="eyebrow">Current Menu</span>
           <strong>{len(products)} items available</strong>
-          <a class="source-link" href="/static/Info_vid.mov" target="_blank" rel="noopener noreferrer">Open BudHub promo video</a>
         </div>
       </div>
     </section>
@@ -3134,7 +3142,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
     connection.execute("DELETE FROM cart_items WHERE user_id = ?", (user["id"],))
     log_activity(connection, user, "CHECKOUT_BAG", f"Created grouped order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
-    return redirect(start_response, "/dashboard?message=Grouped Budhub ticket created")
+    return redirect_with_message(start_response, return_to, f"Grouped order ticket #{ticket_id} created")
 
 
 def handle_update_order(environ, start_response, connection, user):
