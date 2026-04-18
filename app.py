@@ -1102,6 +1102,7 @@ def init_db():
         ensure_column(connection, "support_tickets", "related_ticket_id INTEGER")
         ensure_column(connection, "support_tickets", "subject TEXT")
         ensure_column(connection, "support_tickets", "assigned_to INTEGER")
+        ensure_column(connection, "guest_help_requests", "request_type TEXT NOT NULL DEFAULT 'REGISTRATION_HELP'")
         ensure_column(connection, "products", "category TEXT NOT NULL DEFAULT 'General'")
         ensure_column(connection, "products", "image_url TEXT")
         ensure_column(connection, "products", "source_url TEXT")
@@ -1267,6 +1268,18 @@ def login_form(error=""):
         <label>Password<input type="password" name="password" required></label>
         <button type="submit">Sign In</button>
       </form>
+      <div class="demo-box" id="login-recovery">
+        <strong>Forgot password or locked out?</strong>
+        <p class="demo-note">Send an account recovery request directly to the BudHub engineers. It will appear in the engineer dashboard for login recovery review.</p>
+        <form method="post" action="/guest-help" class="form-grid">
+          <input type="hidden" name="request_type" value="ACCOUNT_RECOVERY">
+          <input type="hidden" name="return_to" value="/login">
+          <label>Name<input type="text" name="name" required></label>
+          <label>Email<input type="email" name="email" required></label>
+          <label>Issue<textarea name="issue" required placeholder="Tell the engineers what happened with your login or password"></textarea></label>
+          <button type="submit" class="button ghost">Send Password Recovery Request</button>
+        </form>
+      </div>
     </section>
     """
 
@@ -1290,6 +1303,8 @@ def register_form(error=""):
         <strong>Need help with registration?</strong>
         <p class="demo-note">Use this form if something is blocking access before you can finish account creation. Once you are inside the platform, the discreet BudHub help button opens your full support thread.</p>
         <form method="post" action="/guest-help" class="form-grid">
+          <input type="hidden" name="request_type" value="REGISTRATION_HELP">
+          <input type="hidden" name="return_to" value="/register">
           <label>Name<input type="text" name="name" required></label>
           <label>Email<input type="email" name="email" required></label>
           <label>Issue<textarea name="issue" required placeholder="Explain what is stopping you from creating or using your account"></textarea></label>
@@ -1714,7 +1729,7 @@ def render_activity_list(connection, user_id, title="Recent Activity", limit=8):
 
 
 def render_staff_clock_panel(connection, user):
-    if user["role"] == "client":
+    if user["role"] in {"client", "admin", "helpdesk"}:
         return ""
     active_entry = active_time_clock_entry(connection, user["id"])
     entries, weekly_hours = time_clock_summary(connection, user["id"])
@@ -1746,6 +1761,8 @@ def render_staff_clock_panel(connection, user):
 
 
 def render_account_stats_panel(connection, user):
+    if user["role"] in {"admin", "helpdesk"}:
+        return ""
     stats = user_stats_map(connection).get(user["id"])
     ensure_user_stats_row(connection, user["id"])
     stats = user_stats_map(connection).get(user["id"])
@@ -2851,9 +2868,36 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       <section class="panel">
         <h2>Registration Help Requests</h2>
         <div class="order-card-grid">
-          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(request['email'])}</span><h3>{html.escape(request['name'])}</h3></div><span class='menu-count'>{html.escape(request['status'])}</span></div><div class='reason-box'>{html.escape(request['issue'])}</div><form method='post' action='/guest-help/update' class='action-stack'><input type='hidden' name='request_id' value='{request['id']}'><label>Status<select name='status'><option value='OPEN'>Open</option><option value='REVIEWED'>Reviewed</option><option value='CLOSED'>Closed</option></select></label><label>Response Note<textarea name='response_note' placeholder='Internal follow-up or response summary'></textarea></label><button type='submit'>Update Request</button></form></article>" for request in guest_help) or '<p>No registration help requests yet.</p>'}
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(request['request_type'] or 'REGISTRATION_HELP')} | {html.escape(request['email'])}</span><h3>{html.escape(request['name'])}</h3></div><span class='menu-count'>{html.escape(request['status'])}</span></div><div class='reason-box'>{html.escape(request['issue'])}</div><form method='post' action='/guest-help/update' class='action-stack'><input type='hidden' name='request_id' value='{request['id']}'><label>Status<select name='status'><option value='OPEN'>Open</option><option value='REVIEWED'>Reviewed</option><option value='CLOSED'>Closed</option></select></label><label>Response Note<textarea name='response_note' placeholder='Internal follow-up or response summary'></textarea></label><button type='submit'>Update Request</button></form></article>" for request in guest_help) or '<p>No registration help requests yet.</p>'}
         </div>
       </section>
+    </section>
+    <section class="panel">
+      <h2>Engineer Account Recovery</h2>
+      <div class="order-card-grid">
+        {''.join(
+            f"""
+            <article class='order-card'>
+              <div class='order-card-head'>
+                <div><span class='eyebrow'>{html.escape(ROLE_LABELS.get(account['role'], account['role']))}</span><h3>{html.escape(account['name'])}</h3></div>
+                <span class='menu-count'>{html.escape(account['email'])}</span>
+              </div>
+              <form method='post' action='/users/recover' class='form-grid'>
+                <input type='hidden' name='user_id' value='{account['id']}'>
+                <label>Reset Login Email<input type='email' name='email' value='{html.escape(account['email'])}' required></label>
+                <label>Reset Password<input type='text' name='password' minlength='6' placeholder='Enter a new temporary password' required></label>
+                <button type='submit'>Update Login Access</button>
+              </form>
+              <form method='post' action='/users/delete' class='action-stack'>
+                <input type='hidden' name='user_id' value='{account['id']}'>
+                <label>Deletion Note<textarea name='reason' required placeholder='Why is this account being removed or archived?'></textarea></label>
+                <button type='submit' class='danger'>Delete or Archive Account</button>
+              </form>
+            </article>
+            """
+            for account in users if account["role"] != "helpdesk"
+        ) or '<p>No accounts available for engineer recovery tools.</p>'}
+      </div>
     </section>
     <section class="panel">
       <h2>Account Activity Log</h2>
@@ -3366,16 +3410,19 @@ def handle_create_support_ticket(environ, start_response, connection, user):
 def handle_guest_help_request(environ, start_response, connection):
     data = read_post_data(environ)
     if not data.get("name", "").strip() or not data.get("email", "").strip() or not data.get("issue", "").strip():
-        return redirect(start_response, "/register?message=Name, email, and issue are required")
+        return redirect(start_response, f"{data.get('return_to', '/register')}?message=Name, email, and issue are required")
+    request_type = data.get("request_type", "REGISTRATION_HELP").strip() or "REGISTRATION_HELP"
     connection.execute(
         """
-        INSERT INTO guest_help_requests (name, email, issue, status, response_note, created_at, updated_at)
-        VALUES (?, ?, ?, 'OPEN', '', ?, ?)
+        INSERT INTO guest_help_requests (name, email, issue, request_type, status, response_note, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'OPEN', '', ?, ?)
         """,
-        (data.get("name", "").strip(), data.get("email", "").strip().lower(), data.get("issue", "").strip(), now_iso(), now_iso()),
+        (data.get("name", "").strip(), data.get("email", "").strip().lower(), data.get("issue", "").strip(), request_type, now_iso(), now_iso()),
     )
     connection.commit()
-    return redirect(start_response, "/register?message=Registration help request sent")
+    destination = data.get("return_to", "/register") or "/register"
+    success_message = "Password recovery request sent to engineer dashboard" if request_type == "ACCOUNT_RECOVERY" else "Registration help request sent"
+    return redirect(start_response, f"{destination}?message={success_message}")
 
 
 def handle_support_reply(environ, start_response, connection, user):
@@ -3802,6 +3849,92 @@ def handle_update_user_stats(environ, start_response, connection, user):
     return redirect(start_response, "/admin?message=Account statistics updated")
 
 
+def handle_engineer_recover_user(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin"})
+    if gate:
+        return gate
+    if user["role"] != "helpdesk":
+        return redirect(start_response, "/admin?message=Only engineer accounts can use account recovery tools")
+    data = read_post_data(environ)
+    target_id = int(data.get("user_id", "0"))
+    target = connection.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
+    if not target:
+        return redirect(start_response, "/admin?message=Account not found")
+    new_email = data.get("email", "").strip().lower()
+    new_password = data.get("password", "").strip()
+    if not new_email or not new_password or len(new_password) < 6:
+        return redirect(start_response, "/admin?message=Recovery email and a 6 character password are required")
+    existing = connection.execute("SELECT id FROM users WHERE email = ? AND id != ?", (new_email, target_id)).fetchone()
+    if existing:
+        return redirect(start_response, "/admin?message=That login email is already in use")
+    connection.execute(
+        "UPDATE users SET email = ?, password_hash = ?, account_state = 'ACTIVE', account_reason = NULL WHERE id = ?",
+        (new_email, hash_password(new_password), target_id),
+    )
+    log_activity(connection, user, "ENGINEER_RESET_LOGIN", f"Reset login credentials for {target['email']} to {new_email}.", target_user_id=target_id)
+    connection.commit()
+    return redirect(start_response, "/admin?message=Account login updated")
+
+
+def handle_engineer_delete_user(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin"})
+    if gate:
+        return gate
+    if user["role"] != "helpdesk":
+        return redirect(start_response, "/admin?message=Only engineer accounts can use deletion tools")
+    data = read_post_data(environ)
+    target_id = int(data.get("user_id", "0"))
+    reason = data.get("reason", "").strip()
+    target = connection.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
+    if not target:
+        return redirect(start_response, "/admin?message=Account not found")
+    if target["role"] == "helpdesk":
+        return redirect(start_response, "/admin?message=Engineer accounts cannot be deleted here")
+    if target["id"] == user["id"]:
+        return redirect(start_response, "/admin?message=You cannot delete the current engineer session")
+    if not reason:
+        return redirect(start_response, "/admin?message=Deletion note is required")
+    linked = connection.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM tickets WHERE client_id = ? OR banker_id = ? OR dispatcher_id = ? OR picker_id = ? OR driver_id = ?) +
+          (SELECT COUNT(*) FROM support_tickets WHERE user_id = ? OR opened_by = ? OR assigned_to = ?) +
+          (SELECT COUNT(*) FROM support_messages WHERE author_id = ?) +
+          (SELECT COUNT(*) FROM credit_ledger WHERE user_id = ? OR issued_by = ?) +
+          (SELECT COUNT(*) FROM activity_logs WHERE actor_id = ? OR target_user_id = ?) AS linked_count
+        """,
+        (target_id, target_id, target_id, target_id, target_id, target_id, target_id, target_id, target_id, target_id, target_id, target_id, target_id),
+    ).fetchone()["linked_count"]
+    if linked:
+        archived_email = f"deleted-{target_id}-{secrets.token_hex(4)}@archived.local"
+        connection.execute(
+            """
+            UPDATE users
+            SET name = ?, email = ?, password_hash = ?, account_state = 'BANNED', account_reason = ?, verification_status = 'REJECTED'
+            WHERE id = ?
+            """,
+            (
+                f"Deleted User #{target_id}",
+                archived_email,
+                hash_password(secrets.token_hex(16)),
+                f"Engineer archived this account. {reason}",
+                target_id,
+            ),
+        )
+        log_activity(connection, user, "ENGINEER_ARCHIVE_ACCOUNT", f"Archived account {target['email']}. Reason: {reason}", target_user_id=target_id)
+        connection.commit()
+        return redirect(start_response, "/admin?message=Account had history, so it was archived and login was disabled")
+    connection.execute("DELETE FROM sessions WHERE user_id = ?", (target_id,))
+    connection.execute("DELETE FROM cart_items WHERE user_id = ?", (target_id,))
+    connection.execute("DELETE FROM user_stats WHERE user_id = ?", (target_id,))
+    connection.execute("DELETE FROM time_clock_entries WHERE user_id = ?", (target_id,))
+    connection.execute("DELETE FROM activity_logs WHERE actor_id = ? OR target_user_id = ?", (target_id, target_id))
+    connection.execute("DELETE FROM users WHERE id = ?", (target_id,))
+    log_activity(connection, user, "ENGINEER_DELETE_ACCOUNT", f"Deleted account {target['email']}. Reason: {reason}")
+    connection.commit()
+    return redirect(start_response, "/admin?message=Account deleted")
+
+
 def handle_update_support_ticket(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"admin"})
     if gate:
@@ -3979,6 +4112,10 @@ def application(environ, start_response):
             return handle_update_user_account(environ, start_response, connection, user)
         if path == "/users/stats-update" and method == "POST":
             return handle_update_user_stats(environ, start_response, connection, user)
+        if path == "/users/recover" and method == "POST":
+            return handle_engineer_recover_user(environ, start_response, connection, user)
+        if path == "/users/delete" and method == "POST":
+            return handle_engineer_delete_user(environ, start_response, connection, user)
         if path == "/users/verify" and method == "POST":
             return handle_user_verification(environ, start_response, connection, user)
         if path == "/support/create" and method == "POST":
