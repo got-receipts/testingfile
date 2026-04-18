@@ -507,8 +507,8 @@ def redirect_with_message(start_response, location, message, cookie_header=None)
 
 def active_store_note(category):
     if category == "All":
-        return "Use the submenu, search, and strain filters to narrow the live menu without leaving the page."
-    return MENU_SECTION_NOTES.get(category, "Live inventory available now.")
+        return ""
+    return ""
 
 
 def render_store_chip(label, url, active=False, kind="category"):
@@ -537,7 +537,6 @@ def render_cart_widget(connection, user, filters):
         <aside class="panel cart-widget" id="bag-widget">
           <span class="eyebrow">Bag Widget</span>
           <h2>Sign in to build a bag</h2>
-          <p>Customers can add items, keep browsing the menu, and check out from this same page.</p>
           <a class="button" href="/login">Customer Login</a>
         </aside>
         """
@@ -1055,6 +1054,7 @@ def init_db():
                 discount_type TEXT NOT NULL,
                 discount_value REAL NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
+                uses_remaining INTEGER,
                 created_at TEXT NOT NULL
             );
 
@@ -1103,6 +1103,7 @@ def init_db():
         ensure_column(connection, "support_tickets", "subject TEXT")
         ensure_column(connection, "support_tickets", "assigned_to INTEGER")
         ensure_column(connection, "guest_help_requests", "request_type TEXT NOT NULL DEFAULT 'REGISTRATION_HELP'")
+        ensure_column(connection, "coupons", "uses_remaining INTEGER")
         ensure_column(connection, "products", "category TEXT NOT NULL DEFAULT 'General'")
         ensure_column(connection, "products", "image_url TEXT")
         ensure_column(connection, "products", "source_url TEXT")
@@ -1200,6 +1201,8 @@ def render_nav(user, cart_count=0):
         if user["role"] == "client":
             links.append(f'<a href="/#bag-widget">Bag ({cart_count})</a>')
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-activity-widget">Activity</button>')
+        if user["role"] in {"admin", "helpdesk"}:
+            links.append('<button type="button" class="button ghost nav-activity-button" id="open-admin-activity-widget">Activity</button>')
         if user["role"] in {"admin", "helpdesk"}:
             links.append('<a href="/admin">Admin</a>')
         links.append(f'<span class="nav-user">{html.escape(user["name"])} ({html.escape(ROLE_LABELS.get(user["role"], user["role"]))})</span>')
@@ -1331,18 +1334,48 @@ def register_form(error=""):
         <label>Selfie Holding ID<input type="file" name="id_selfie" accept="image/*" required></label>
         <button type="submit">Create Account</button>
       </form>
-      <div class="demo-box" id="support-access">
-        <strong>Need help with registration?</strong>
-        <p class="demo-note">Use this form if something is blocking access before you can finish account creation. Once you are inside the platform, the discreet BudHub help button opens your full support thread.</p>
-        <form method="post" action="/guest-help" class="form-grid">
-          <input type="hidden" name="request_type" value="REGISTRATION_HELP">
-          <input type="hidden" name="return_to" value="/register">
-          <label>Name<input type="text" name="name" required></label>
-          <label>Email<input type="email" name="email" required></label>
-          <label>Issue<textarea name="issue" required placeholder="Explain what is stopping you from creating or using your account"></textarea></label>
-          <button type="submit" class="button ghost">Send Registration Help Request</button>
-        </form>
+      <div class="login-support-row" id="support-access">
+        <button type="button" class="button ghost" id="open-registration-help-modal">Need help with registration?</button>
       </div>
+      <div class="modal-shell is-hidden" id="registration-help-modal">
+        <div class="modal-backdrop" data-close-register-help="yes"></div>
+        <div class="modal-card">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">Registration Help</span>
+              <h3>Send Registration Support Request</h3>
+            </div>
+            <button type="button" class="button ghost modal-close" data-close-register-help="yes">Close</button>
+          </div>
+          <p class="demo-note">Use this form if something is blocking access before you can finish account creation. The request goes to the engineer dashboard for review.</p>
+          <form method="post" action="/guest-help" class="form-grid">
+            <input type="hidden" name="request_type" value="REGISTRATION_HELP">
+            <input type="hidden" name="return_to" value="/register">
+            <label>Name<input type="text" name="name" required></label>
+            <label>Email<input type="email" name="email" required></label>
+            <label>Issue<textarea name="issue" required placeholder="Explain what is stopping you from creating or using your account"></textarea></label>
+            <button type="submit">Send Registration Help Request</button>
+          </form>
+        </div>
+      </div>
+      <script>
+        (function () {{
+          var openButton = document.getElementById('open-registration-help-modal');
+          var modal = document.getElementById('registration-help-modal');
+          if (!openButton || !modal) {{
+            return;
+          }}
+          function closeModal() {{
+            modal.classList.add('is-hidden');
+          }}
+          openButton.addEventListener('click', function () {{
+            modal.classList.remove('is-hidden');
+          }});
+          modal.querySelectorAll('[data-close-register-help="yes"]').forEach(function (node) {{
+            node.addEventListener('click', closeModal);
+          }});
+        }})();
+      </script>
     </section>
     """
 
@@ -1633,6 +1666,12 @@ def normalize_coupon_code(code):
     return (code or "").strip().upper()
 
 
+def coupon_usage_label(coupon):
+    if coupon["uses_remaining"] is None:
+        return "Unlimited"
+    return f"{coupon['uses_remaining']} uses left"
+
+
 def subtotal_from_items(items):
     return sum(item["quantity"] * item["locked_price"] for item in items)
 
@@ -1794,6 +1833,210 @@ def render_client_activity_widget(connection, user):
           modal.classList.remove('is-hidden');
         }});
         modal.querySelectorAll('[data-close-activity="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_admin_activity_widget(connection, user):
+    if not user or user["role"] not in {"admin", "helpdesk"}:
+        return ""
+    rows = personal_activity_rows(connection, user["id"], 12)
+    return f"""
+    <div class="modal-shell is-hidden" id="admin-activity-widget">
+      <div class="modal-backdrop" data-close-admin-activity="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Admin Activity</span>
+            <h3>Your Recent History</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-admin-activity="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(row['actor_role'] or 'System')}</span><h3>{html.escape(row['action'])}</h3></div><span class='menu-count'>{html.escape(row['created_at'])}</span></div><div class='reason-box'>{html.escape(row['details'] or 'No extra details provided.')}</div></article>" for row in rows) or '<p>No activity logged yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-admin-activity-widget');
+        var modal = document.getElementById('admin-activity-widget');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-admin-activity="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_account_recovery_widget(users, viewer_role):
+    title = "Engineer Account Recovery" if viewer_role == "helpdesk" else "Admin Account Recovery"
+    allowed_accounts = [account for account in users if account["role"] != "helpdesk"]
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Account Access</span>
+          <h2>{html.escape(title)}</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-account-recovery-modal">Open Recovery Widget</button>
+      </div>
+      <p>Reset login credentials, update account access, or remove/archive accounts from one popup tool.</p>
+    </section>
+    <div class="modal-shell is-hidden" id="account-recovery-modal">
+      <div class="modal-backdrop" data-close-account-recovery="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Recovery Tools</span>
+            <h3>{html.escape(title)}</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-account-recovery="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(
+              f"""
+              <article class='order-card'>
+                <div class='order-card-head'>
+                  <div><span class='eyebrow'>{html.escape(ROLE_LABELS.get(account['role'], account['role']))}</span><h3>{html.escape(account['name'])}</h3></div>
+                  <span class='menu-count'>{html.escape(account['email'])}</span>
+                </div>
+                <form method='post' action='/users/recover' class='form-grid'>
+                  <input type='hidden' name='user_id' value='{account['id']}'>
+                  <label>Reset Login Email<input type='email' name='email' value='{html.escape(account['email'])}' required></label>
+                  <label>Reset Password<input type='text' name='password' minlength='6' placeholder='Enter a new temporary password' required></label>
+                  <button type='submit'>Update Login Access</button>
+                </form>
+                <form method='post' action='/users/delete' class='action-stack'>
+                  <input type='hidden' name='user_id' value='{account['id']}'>
+                  <label>Deletion Note<textarea name='reason' required placeholder='Why is this account being removed or archived?'></textarea></label>
+                  <button type='submit' class='danger'>Delete or Archive Account</button>
+                </form>
+              </article>
+              """
+              for account in allowed_accounts
+          ) or '<p>No accounts available for recovery tools.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-account-recovery-modal');
+        var modal = document.getElementById('account-recovery-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-account-recovery="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_account_management_widget(users, user_stats, viewer_role):
+    employee_roles = {"banker", "dispatcher", "picker", "driver"}
+    title = "Engineer Account Manager" if viewer_role == "helpdesk" else "Admin Account Manager"
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Accounts</span>
+          <h2>{html.escape(title)}</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-account-manager-modal">Open Accounts Widget</button>
+      </div>
+      <p>Open the popup to review each account profile, change account state, adjust employee settings, or remove/archive accounts.</p>
+    </section>
+    <div class="modal-shell is-hidden" id="account-manager-modal">
+      <div class="modal-backdrop" data-close-account-manager="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Account Profiles</span>
+            <h3>{html.escape(title)}</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-account-manager="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(
+              f"""
+              <article class='order-card'>
+                <div class='order-card-head'>
+                  <div><span class='eyebrow'>{html.escape(account['email'])}</span><h3>{html.escape(account['name'])}</h3></div>
+                  <span class='badge badge-{"delivered" if account["account_state"] == "ACTIVE" else "review_required"}'>{html.escape(account['account_state'].title())}</span>
+                </div>
+                <div class='order-meta'>
+                  <span>Role: {html.escape(ROLE_LABELS.get(account['role'], account['role']))}</span>
+                  <span>Reason: {html.escape(account['account_reason'] or 'None')}</span>
+                </div>
+                <details class='details-panel'>
+                  <summary>Profile Actions</summary>
+                  <form method='post' action='/users/update' class='action-stack'>
+                    <input type='hidden' name='user_id' value='{account['id']}'>
+                    <label>Account Action<select name='account_state'><option value='ACTIVE'>Active</option><option value='LOCKED'>Lock</option><option value='SUSPENDED'>Suspend</option><option value='BANNED'>Ban</option></select></label>
+                    <label>Reason<textarea name='reason' required placeholder='Reason for account state change'></textarea></label>
+                    <button type='submit'>Update Account</button>
+                  </form>
+                </details>
+                <details class='details-panel{" is-hidden" if account["role"] not in employee_roles else ""}'>
+                  <summary>Employment Settings</summary>
+                  <form method='post' action='/users/stats-update' class='form-grid'>
+                    <input type='hidden' name='user_id' value='{account['id']}'>
+                    <label>Hourly Rate<input type='number' name='hourly_rate' min='0' step='0.01' value='{(user_stats.get(account['id'])['hourly_rate'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                    <label>Total Trips<input type='number' name='total_trips' min='0' value='{(user_stats.get(account['id'])['total_trips'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                    <label>Total Orders Picked<input type='number' name='total_orders_picked' min='0' value='{(user_stats.get(account['id'])['total_orders_picked'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                    <label>Total Orders Dispatched<input type='number' name='total_orders_dispatched' min='0' value='{(user_stats.get(account['id'])['total_orders_dispatched'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                    <button type='submit'>Save Employment Settings</button>
+                  </form>
+                </details>
+                <details class='details-panel'>
+                  <summary>Delete / Archive Account</summary>
+                  <form method='post' action='/users/delete' class='action-stack'>
+                    <input type='hidden' name='user_id' value='{account['id']}'>
+                    <label>Deletion Note<textarea name='reason' required placeholder='Why is this account being removed or archived?'></textarea></label>
+                    <button type='submit' class='danger'>Delete or Archive Account</button>
+                  </form>
+                </details>
+              </article>
+              """
+              for account in users
+          ) or '<p>No accounts available.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-account-manager-modal');
+        var modal = document.getElementById('account-manager-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-account-manager="yes"]').forEach(function (node) {{
           node.addEventListener('click', closeModal);
         }});
       }})();
@@ -1972,6 +2215,8 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
         coupon = connection.execute("SELECT * FROM coupons WHERE code = ? AND active = 1", (coupon_code,)).fetchone()
         if not coupon:
             raise ValueError("Coupon code is not valid")
+        if coupon["uses_remaining"] is not None and int(coupon["uses_remaining"]) <= 0:
+            raise ValueError("Coupon code has no uses remaining")
     discount_amount = coupon_discount_amount(coupon, subtotal)
     available_credit = float(client["credit_balance"] or 0)
     credit_applied = round(min(max(0.0, available_credit), max(0.0, subtotal - discount_amount)), 2) if use_credits else 0.0
@@ -2016,6 +2261,11 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
             VALUES (?, ?, ?, ?, ?)
             """,
             (client_id, client_id, -credit_applied, f"Applied to ticket {ticket_number}", now_iso()),
+        )
+    if coupon and coupon["uses_remaining"] is not None:
+        connection.execute(
+            "UPDATE coupons SET uses_remaining = CASE WHEN uses_remaining > 0 THEN uses_remaining - 1 ELSE 0 END WHERE id = ?",
+            (coupon["id"],),
         )
     return ticket_id
 
@@ -2853,8 +3103,6 @@ def render_admin_home(connection, user, message=None, level="info"):
     title = "Engineer Dashboard" if user["role"] == "helpdesk" else "Admin Dashboard"
     finance = finance_snapshot(connection)
     body = f"""
-    {render_account_stats_panel(connection, user)}
-    {render_staff_clock_panel(connection, user)}
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]}</strong></div>
       <div class="stat-card"><span>Menu Items</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM products").fetchone()["count"]}</strong></div>
@@ -2870,11 +3118,9 @@ def render_admin_home(connection, user, message=None, level="info"):
         <h2>Budhub operations overview</h2>
         <div class="hero-actions"><a class="button" href="/admin">Open Admin Tools</a><a class="button ghost" href="/">View Customer Menu</a></div>
       </section>
-      <section class="panel"><span class="eyebrow">Flow</span><h2>Bank verifies first, dispatch assigns drivers</h2><p>The workflow now follows the same order every time.</p></section>
     </section>
-    {render_activity_list(connection, user["id"], title="Your Admin Activity")}
     """
-    return page(title, body, user=user, message=message, level=level, auto_refresh=True)
+    return page(title, body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_admin_activity_widget(connection, user))
 
 
 def render_admin_dashboard(connection, user, message=None, level="info"):
@@ -2955,33 +3201,6 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       </section>
     </section>
     <section class="panel">
-      <h2>Engineer Account Recovery</h2>
-      <div class="order-card-grid">
-        {''.join(
-            f"""
-            <article class='order-card'>
-              <div class='order-card-head'>
-                <div><span class='eyebrow'>{html.escape(ROLE_LABELS.get(account['role'], account['role']))}</span><h3>{html.escape(account['name'])}</h3></div>
-                <span class='menu-count'>{html.escape(account['email'])}</span>
-              </div>
-              <form method='post' action='/users/recover' class='form-grid'>
-                <input type='hidden' name='user_id' value='{account['id']}'>
-                <label>Reset Login Email<input type='email' name='email' value='{html.escape(account['email'])}' required></label>
-                <label>Reset Password<input type='text' name='password' minlength='6' placeholder='Enter a new temporary password' required></label>
-                <button type='submit'>Update Login Access</button>
-              </form>
-              <form method='post' action='/users/delete' class='action-stack'>
-                <input type='hidden' name='user_id' value='{account['id']}'>
-                <label>Deletion Note<textarea name='reason' required placeholder='Why is this account being removed or archived?'></textarea></label>
-                <button type='submit' class='danger'>Delete or Archive Account</button>
-              </form>
-            </article>
-            """
-            for account in users if account["role"] != "helpdesk"
-        ) or '<p>No accounts available for engineer recovery tools.</p>'}
-      </div>
-    </section>
-    <section class="panel">
       <h2>Account Activity Log</h2>
       <div class="order-card-grid">
         {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(log['actor_role'] or 'System')}</span><h3>{html.escape(log['actor_name'] or 'System')}</h3></div><span class='menu-count'>{html.escape(log['created_at'])}</span></div><div class='order-meta'><span>Action: {html.escape(log['action'])}</span><span>Target: {html.escape(log['target_user_name'] or 'N/A')}</span></div><div class='reason-box'>{html.escape(log['details'] or 'No extra details provided.')}</div></article>" for log in activity_logs) or '<p>No activity logged yet.</p>'}
@@ -3009,6 +3228,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
         <div class="stat-card"><span>Delivered Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
       </div>
     </section>
+    {render_account_recovery_widget(users, user["role"])}
     <section class="admin-grid">
       <section class="panel">
         <h2>Create Team Member or Customer</h2>
@@ -3061,10 +3281,11 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
           <label>Code<input type="text" name="code" required></label>
           <label>Type<select name="discount_type"><option value="FLAT">Flat Amount</option><option value="PERCENT">Percent</option></select></label>
           <label>Value<input type="number" name="discount_value" min="0.01" step="0.01" required></label>
+          <label>Uses Remaining<input type="number" name="uses_remaining" min="0" placeholder="Leave blank for unlimited"></label>
           <button type="submit">Create Coupon</button>
         </form>
         <div class="order-card-grid">
-          {''.join(f"<div class='item-pill'><strong>{html.escape(coupon['code'])}</strong><span>{html.escape(coupon['discount_type'])} {coupon['discount_value']}</span><span>{'Active' if coupon['active'] else 'Inactive'}</span></div>" for coupon in coupons) or '<p>No coupons yet.</p>'}
+          {''.join(f"<form method='post' action='/coupons/delete' class='item-pill inline-pill-form'><strong>{html.escape(coupon['code'])}</strong><span>{html.escape(coupon['discount_type'])} {coupon['discount_value']}</span><span>{html.escape(coupon_usage_label(coupon))}</span><span>{'Active' if coupon['active'] else 'Inactive'}</span><input type='hidden' name='coupon_id' value='{coupon['id']}'><button type='submit' class='button ghost'>Delete</button></form>" for coupon in coupons) or '<p>No coupons yet.</p>'}
         </div>
       </section>
       {render_credit_issue_panel(connection)}
@@ -3109,68 +3330,10 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
         ) or '<p>No pending ID reviews.</p>'}
       </div>
     </section>
-    <section class="admin-grid">
-      <section class="panel">
-        <h2>Account Controls</h2>
-        <div class="order-card-grid">
-          {''.join(
-              f'''
-              <article class="order-card">
-                <div class="order-card-head">
-                  <div><span class="eyebrow">{html.escape(account["email"])}</span><h3>{html.escape(account["name"])}</h3></div>
-                  <span class="badge badge-{"delivered" if account["account_state"] == "ACTIVE" else "review_required"}">{html.escape(account["account_state"].title())}</span>
-                </div>
-                <div class="order-meta">
-                  <span>Role: {html.escape(ROLE_LABELS.get(account["role"], account["role"]))}</span>
-                  <span>Reason: {html.escape(account["account_reason"] or "None")}</span>
-                </div>
-                <form method="post" action="/users/update" class="action-stack">
-                  <input type="hidden" name="user_id" value="{account["id"]}">
-                  <label>Account Action<select name="account_state"><option value="ACTIVE">Active</option><option value="LOCKED">Lock</option><option value="SUSPENDED">Suspend</option><option value="BANNED">Ban</option></select></label>
-                  <label>Reason<textarea name="reason" required placeholder="Reason for account state change"></textarea></label>
-                  <button type="submit">Update Account</button>
-                </form>
-              </article>
-              '''
-              for account in users if account["role"] != "admin"
-          ) or '<p>No accounts available.</p>'}
-        </div>
-      </section>
-    </section>
-    <section class="panel">
-      <h2>Account Statistics and Payroll</h2>
-      <div class="order-card-grid">
-        {''.join(
-            f"""
-            <article class='order-card'>
-              <div class='order-card-head'>
-                <div><span class='eyebrow'>{html.escape(account['email'])}</span><h3>{html.escape(account['name'])}</h3></div>
-                <span class='menu-count'>{html.escape(ROLE_LABELS.get(account['role'], account['role']))}</span>
-              </div>
-              <div class='order-meta'>
-                <span>Hourly Rate: {format_money((user_stats.get(account['id'])['hourly_rate'] if user_stats.get(account['id']) else 0) or 0)}</span>
-                <span>Total Trips: {(user_stats.get(account['id'])['total_trips'] if user_stats.get(account['id']) else 0) or 0}</span>
-                <span>Orders Picked: {(user_stats.get(account['id'])['total_orders_picked'] if user_stats.get(account['id']) else 0) or 0}</span>
-                <span>Orders Dispatched: {(user_stats.get(account['id'])['total_orders_dispatched'] if user_stats.get(account['id']) else 0) or 0}</span>
-              </div>
-              <form method='post' action='/users/stats-update' class='form-grid'>
-                <input type='hidden' name='user_id' value='{account['id']}'>
-                <label>Hourly Rate<input type='number' name='hourly_rate' min='0' step='0.01' value='{(user_stats.get(account['id'])['hourly_rate'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                <label>Total Trips<input type='number' name='total_trips' min='0' value='{(user_stats.get(account['id'])['total_trips'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                <label>Total Orders Picked<input type='number' name='total_orders_picked' min='0' value='{(user_stats.get(account['id'])['total_orders_picked'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                <label>Total Orders Dispatched<input type='number' name='total_orders_dispatched' min='0' value='{(user_stats.get(account['id'])['total_orders_dispatched'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                <button type='submit'>Update Pay and Stats</button>
-              </form>
-              {render_activity_list(connection, account["id"], title="Account Activity", limit=4)}
-            </article>
-            """
-            for account in users
-        ) or '<p>No account statistics available.</p>'}
-      </div>
-    </section>
+    {render_account_management_widget(users, user_stats, user["role"])}
     {engineer_sections}
     """
-    return page(title, body, user=user, message=message, level=level, auto_refresh=True)
+    return page(title, body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_admin_activity_widget(connection, user))
 
 
 def render_helpdesk_dashboard(connection, user, message=None, level="info"):
@@ -3401,18 +3564,37 @@ def handle_create_coupon(environ, start_response, connection, user):
     code = normalize_coupon_code(data.get("code", ""))
     if not code:
         return redirect(start_response, "/admin?message=Coupon code is required")
+    uses_remaining_raw = data.get("uses_remaining", "").strip()
+    uses_remaining = int(uses_remaining_raw) if uses_remaining_raw else None
+    if uses_remaining is not None and uses_remaining < 0:
+        return redirect(start_response, "/admin?message=Uses remaining must be zero or higher")
     try:
         connection.execute(
             """
-            INSERT INTO coupons (code, discount_type, discount_value, active, created_at)
-            VALUES (?, ?, ?, 1, ?)
+            INSERT INTO coupons (code, discount_type, discount_value, active, uses_remaining, created_at)
+            VALUES (?, ?, ?, 1, ?, ?)
             """,
-            (code, data.get("discount_type", "FLAT"), float(data.get("discount_value", "0")), now_iso()),
+            (code, data.get("discount_type", "FLAT"), float(data.get("discount_value", "0")), uses_remaining, now_iso()),
         )
         connection.commit()
     except sqlite3.IntegrityError:
         return redirect(start_response, "/admin?message=Coupon code already exists")
     return redirect(start_response, "/admin?message=Coupon created")
+
+
+def handle_delete_coupon(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    coupon_id = int(data.get("coupon_id", "0"))
+    coupon = connection.execute("SELECT * FROM coupons WHERE id = ?", (coupon_id,)).fetchone()
+    if not coupon:
+        return redirect(start_response, "/admin?message=Coupon not found")
+    connection.execute("DELETE FROM coupons WHERE id = ?", (coupon_id,))
+    log_activity(connection, user, "DELETE_COUPON", f"Deleted coupon {coupon['code']}.")
+    connection.commit()
+    return redirect(start_response, "/admin?message=Coupon deleted")
 
 
 def handle_issue_credit(environ, start_response, connection, user):
@@ -3935,8 +4117,6 @@ def handle_engineer_recover_user(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"admin"})
     if gate:
         return gate
-    if user["role"] != "helpdesk":
-        return redirect(start_response, "/admin?message=Only engineer accounts can use account recovery tools")
     data = read_post_data(environ)
     target_id = int(data.get("user_id", "0"))
     target = connection.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
@@ -3962,18 +4142,16 @@ def handle_engineer_delete_user(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"admin"})
     if gate:
         return gate
-    if user["role"] != "helpdesk":
-        return redirect(start_response, "/admin?message=Only engineer accounts can use deletion tools")
     data = read_post_data(environ)
     target_id = int(data.get("user_id", "0"))
     reason = data.get("reason", "").strip()
     target = connection.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
     if not target:
         return redirect(start_response, "/admin?message=Account not found")
-    if target["role"] == "helpdesk":
-        return redirect(start_response, "/admin?message=Engineer accounts cannot be deleted here")
+    if target["role"] == "helpdesk" and user["role"] != "helpdesk":
+        return redirect(start_response, "/admin?message=Only engineers can remove engineer accounts")
     if target["id"] == user["id"]:
-        return redirect(start_response, "/admin?message=You cannot delete the current engineer session")
+        return redirect(start_response, "/admin?message=You cannot delete the current session account")
     if not reason:
         return redirect(start_response, "/admin?message=Deletion note is required")
     linked = connection.execute(
@@ -4186,6 +4364,8 @@ def application(environ, start_response):
             return handle_create_product(environ, start_response, connection, user)
         if path == "/coupons/create" and method == "POST":
             return handle_create_coupon(environ, start_response, connection, user)
+        if path == "/coupons/delete" and method == "POST":
+            return handle_delete_coupon(environ, start_response, connection, user)
         if path == "/credits/issue" and method == "POST":
             return handle_issue_credit(environ, start_response, connection, user)
         if path == "/users/create" and method == "POST":
