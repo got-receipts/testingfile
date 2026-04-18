@@ -1178,7 +1178,19 @@ def render_nav(user, cart_count=0):
     return "".join(links)
 
 
-def page(title, body, user=None, message=None, level="info", cart_count=0):
+def page(title, body, user=None, message=None, level="info", cart_count=0, auto_refresh=False):
+    refresh_script = ""
+    if auto_refresh:
+        refresh_script = """
+  <script>
+    window.setInterval(function () {
+      var active = document.activeElement;
+      if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) {
+        return;
+      }
+      window.location.reload();
+    }, 30000);
+  </script>"""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1189,15 +1201,7 @@ def page(title, body, user=None, message=None, level="info", cart_count=0):
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
-  <script>
-    window.setInterval(function () {{
-      var active = document.activeElement;
-      if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) {{
-        return;
-      }}
-      window.location.reload();
-    }}, 2000);
-  </script>
+  {refresh_script}
 </head>
 <body>
   <header class="site-header">
@@ -1997,7 +2001,7 @@ def render_client_dashboard(connection, user, message=None, level="info"):
       <div class="order-card-grid">{''.join(cards) if cards else '<p>No orders yet.</p>'}</div>
     </section>
     """
-    return page("Customer Dashboard", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]))
+    return page("Customer Dashboard", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]), auto_refresh=True)
 
 
 def render_cart_page(connection, user, message=None, level="info"):
@@ -2109,7 +2113,7 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
     <section class="panel"><h2>In-House Bank</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No payment reviews waiting.</p>'}</div></section>
     {render_credit_issue_panel(connection)}
     """
-    return page("Bank Dashboard", body, user=user, message=message, level=level)
+    return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_dispatcher_dashboard(connection, user, message=None, level="info"):
@@ -2302,7 +2306,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     <section class="panel"><h2>Dispatch Board</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No dispatch work waiting.</p>'}</div></section>
     {render_credit_issue_panel(connection)}
     """
-    return page("Dispatcher Dashboard", body, user=user, message=message, level=level)
+    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_picker_dashboard(connection, user, message=None, level="info"):
@@ -2353,7 +2357,7 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
     </section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
     """
-    return page("Picker Dashboard", body, user=user, message=message, level=level)
+    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_driver_dashboard(connection, user, message=None, level="info"):
@@ -2439,7 +2443,7 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
     """
-    return page("Driver Dashboard", body, user=user, message=message, level=level)
+    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_admin_home(connection, user, message=None, level="info"):
@@ -2460,7 +2464,7 @@ def render_admin_home(connection, user, message=None, level="info"):
       <section class="panel"><span class="eyebrow">Flow</span><h2>Bank verifies first, dispatch assigns drivers</h2><p>The workflow now follows the same order every time.</p></section>
     </section>
     """
-    return page(title, body, user=user, message=message, level=level)
+    return page(title, body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_admin_dashboard(connection, user, message=None, level="info"):
@@ -2683,7 +2687,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     </section>
     {engineer_sections}
     """
-    return page(title, body, user=user, message=message, level=level)
+    return page(title, body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_helpdesk_dashboard(connection, user, message=None, level="info"):
@@ -2745,7 +2749,7 @@ def render_helpdesk_dashboard(connection, user, message=None, level="info"):
       <div class="order-card-grid">{''.join(cards) if cards else '<p>No help tickets yet.</p>'}</div>
     </section>
     """
-    return page("Budhub Help", body, user=user, message=message, level=level)
+    return page("Budhub Help", body, user=user, message=message, level=level, auto_refresh=True)
 
 
 def render_dashboard(connection, user, message=None, level="info"):
