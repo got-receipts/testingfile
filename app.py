@@ -10,6 +10,13 @@ from urllib.parse import parse_qs, urlencode
 from wsgiref.simple_server import make_server
 from flask import Flask, Response, request
 
+try:
+    import psycopg2
+    from psycopg2 import extras as psycopg2_extras
+except ImportError:
+    psycopg2 = None
+    psycopg2_extras = None
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "commerce.db")
@@ -20,7 +27,248 @@ SESSION_COOKIE = "budhub_session"
 APP_NAME = "Official BudHub"
 APP_TAGLINE = "The 518 cannabis delivery platform for the wider Capital Region."
 CLEANUP_DONE = False
+POSTGRES_INIT_ATTEMPTED = False
+POSTGRES_SYNC_IN_PROGRESS = False
 EMPLOYEE_ROLES = {"banker", "dispatcher", "picker", "driver"}
+
+POSTGRES_CREATE_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        email TEXT UNIQUE,
+        password_hash TEXT,
+        role TEXT,
+        account_state TEXT DEFAULT 'ACTIVE',
+        account_reason TEXT,
+        credit_balance REAL DEFAULT 0,
+        verification_status TEXT DEFAULT 'VERIFIED',
+        verification_note TEXT,
+        id_front_path TEXT,
+        id_back_path TEXT,
+        id_selfie_path TEXT,
+        verified_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT DEFAULT 'General',
+        description TEXT NOT NULL,
+        image_url TEXT,
+        source_url TEXT,
+        leafly_strain_name TEXT,
+        price REAL NOT NULL,
+        stock INTEGER NOT NULL,
+        menu_group TEXT DEFAULT '',
+        strain_type TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS leafly_strains (
+        id SERIAL PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        slug TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        strain_type TEXT DEFAULT 'Unspecified',
+        image_url TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cart_items (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        quantity INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS delivery_blocks (
+        id SERIAL PRIMARY KEY,
+        block_name TEXT UNIQUE NOT NULL,
+        dispatcher_id INTEGER NOT NULL,
+        driver_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        submitted_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tickets (
+        id SERIAL PRIMARY KEY,
+        ticket_number TEXT UNIQUE NOT NULL,
+        client_id INTEGER NOT NULL,
+        fulfillment_type TEXT DEFAULT 'DELIVERY',
+        shipping_address TEXT NOT NULL,
+        customer_note TEXT,
+        status TEXT NOT NULL,
+        payment_status TEXT NOT NULL,
+        coupon_code TEXT,
+        discount_amount REAL DEFAULT 0,
+        credit_applied REAL DEFAULT 0,
+        banker_id INTEGER,
+        dispatcher_id INTEGER,
+        picker_id INTEGER,
+        driver_id INTEGER,
+        delivery_block_id INTEGER,
+        review_reason TEXT,
+        cancel_reason TEXT,
+        internal_note TEXT,
+        stock_released INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ticket_items (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        quantity INTEGER NOT NULL,
+        locked_price REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS support_tickets (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        opened_by INTEGER NOT NULL,
+        category TEXT NOT NULL,
+        subject TEXT,
+        priority TEXT DEFAULT 'NORMAL',
+        related_ticket_id INTEGER,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL,
+        resolution_note TEXT,
+        assigned_to INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS support_messages (
+        id SERIAL PRIMARY KEY,
+        support_ticket_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS activity_logs (
+        id SERIAL PRIMARY KEY,
+        actor_id INTEGER,
+        actor_role TEXT,
+        target_user_id INTEGER,
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS guest_help_requests (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        issue TEXT NOT NULL,
+        status TEXT DEFAULT 'OPEN',
+        response_note TEXT,
+        request_type TEXT DEFAULT 'REGISTRATION_HELP',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS coupons (
+        id SERIAL PRIMARY KEY,
+        code TEXT UNIQUE NOT NULL,
+        discount_type TEXT NOT NULL,
+        discount_value REAL NOT NULL,
+        active INTEGER DEFAULT 1,
+        uses_remaining INTEGER,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS credit_ledger (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        issued_by INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        note TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_stats (
+        user_id INTEGER PRIMARY KEY,
+        is_employee INTEGER DEFAULT 0,
+        hourly_rate REAL DEFAULT 0,
+        total_trips INTEGER DEFAULT 0,
+        total_orders_picked INTEGER DEFAULT 0,
+        total_orders_dispatched INTEGER DEFAULT 0,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS time_clock_entries (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        clock_in_at TEXT NOT NULL,
+        clock_out_at TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+]
+
+POSTGRES_SYNC_TABLES = [
+    "users",
+    "sessions",
+    "leafly_strains",
+    "products",
+    "cart_items",
+    "delivery_blocks",
+    "tickets",
+    "ticket_items",
+    "support_tickets",
+    "support_messages",
+    "activity_logs",
+    "guest_help_requests",
+    "coupons",
+    "credit_ledger",
+    "user_stats",
+    "time_clock_entries",
+]
+
+POSTGRES_SERIAL_TABLES = {
+    "users",
+    "products",
+    "leafly_strains",
+    "cart_items",
+    "delivery_blocks",
+    "tickets",
+    "ticket_items",
+    "support_tickets",
+    "support_messages",
+    "activity_logs",
+    "guest_help_requests",
+    "coupons",
+    "credit_ledger",
+    "time_clock_entries",
+}
 
 MENU_SECTIONS = ["Flower", "Edibles", "Concentrates", "General"]
 STORE_CATEGORY_OPTIONS = ["All"] + MENU_SECTIONS
@@ -367,11 +615,96 @@ LEAFLY_STRAIN_LIBRARY = [
 ]
 
 
+class MirroringSQLiteConnection(sqlite3.Connection):
+    def commit(self):
+        super().commit()
+        sync_sqlite_to_postgres(self)
+
+
 def db_connection():
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, factory=MirroringSQLiteConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def postgres_database_url():
+    return os.environ.get("DATABASE_URL", "").strip()
+
+
+def postgres_enabled():
+    return bool(postgres_database_url()) and psycopg2 is not None
+
+
+def create_postgres_schema(connection):
+    with connection.cursor() as cursor:
+        for statement in POSTGRES_CREATE_STATEMENTS:
+            cursor.execute(statement)
+    connection.commit()
+
+
+def sqlite_table_columns(connection, table_name):
+    return [row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()]
+
+
+def reset_postgres_sequence(cursor, table_name):
+    if table_name not in POSTGRES_SERIAL_TABLES:
+        return
+    cursor.execute(
+        f"""
+        SELECT setval(
+            pg_get_serial_sequence('{table_name}', 'id'),
+            COALESCE((SELECT MAX(id) FROM {table_name}), 1),
+            EXISTS(SELECT 1 FROM {table_name})
+        )
+        """
+    )
+
+
+def sync_sqlite_to_postgres(sqlite_connection):
+    global POSTGRES_SYNC_IN_PROGRESS
+    if POSTGRES_SYNC_IN_PROGRESS or not postgres_enabled():
+        return
+    POSTGRES_SYNC_IN_PROGRESS = True
+    try:
+        database_url = postgres_database_url()
+        with psycopg2.connect(database_url) as pg_connection:
+            create_postgres_schema(pg_connection)
+            with pg_connection.cursor() as cursor:
+                cursor.execute(f"TRUNCATE TABLE {', '.join(POSTGRES_SYNC_TABLES)} RESTART IDENTITY")
+                for table_name in POSTGRES_SYNC_TABLES:
+                    columns = sqlite_table_columns(sqlite_connection, table_name)
+                    if not columns:
+                        continue
+                    rows = sqlite_connection.execute(f"SELECT {', '.join(columns)} FROM {table_name}").fetchall()
+                    if rows:
+                        values = [tuple(row[column] for column in columns) for row in rows]
+                        placeholders = ", ".join(["%s"] * len(columns))
+                        insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+                        if psycopg2_extras is not None:
+                            psycopg2_extras.execute_batch(cursor, insert_sql, values, page_size=200)
+                        else:
+                            cursor.executemany(insert_sql, values)
+                    reset_postgres_sequence(cursor, table_name)
+            pg_connection.commit()
+    except Exception as exc:
+        print(f"PostgreSQL sync skipped: {exc}")
+    finally:
+        POSTGRES_SYNC_IN_PROGRESS = False
+
+
+def init_postgres_db():
+    global POSTGRES_INIT_ATTEMPTED
+    if POSTGRES_INIT_ATTEMPTED:
+        return
+    POSTGRES_INIT_ATTEMPTED = True
+    if not postgres_enabled():
+        return
+    try:
+        with psycopg2.connect(postgres_database_url()) as connection:
+            create_postgres_schema(connection)
+    except Exception as exc:
+        print(f"PostgreSQL initialization skipped: {exc}")
 
 
 def now_iso():
@@ -894,6 +1227,7 @@ def init_db():
     global CLEANUP_DONE
     os.makedirs(STATIC_DIR, exist_ok=True)
     os.makedirs(UPLOADS_DIR, exist_ok=True)
+    init_postgres_db()
     with db_connection() as connection:
         connection.executescript(
             """
