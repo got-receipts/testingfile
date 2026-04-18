@@ -1853,18 +1853,9 @@ def render_store_page(connection, user=None, message=None, level="info", filters
             <span>Capital Region cannabis delivery, built by locals for locals.</span>
           </div>
         </div>
-        <div class="hero-flow">
-          <div>Explore flower, concentrates, and edibles by submenu</div>
-          <div>Search by strain or product name without leaving the menu</div>
-          <div>Build the bag while staying inside the storefront experience</div>
-          <div>Route verified orders through dispatch, blocks, drivers, and tracking</div>
-          <div>Support customers, credits, coupons, and account help from one platform</div>
-        </div>
         <div class="hero-summary">
           <span class="eyebrow">Current Menu</span>
           <strong>{len(products)} items available</strong>
-          <span>{cart_count} items ready in bag</span>
-          <span>{sum(1 for product in products if product["category"] == "Flower" and is_double_stuffed_product(product))} Double Stuffed flower options</span>
           <a class="source-link" href="/static/Info_vid.mov" target="_blank" rel="noopener noreferrer">Open BudHub promo video</a>
         </div>
       </div>
