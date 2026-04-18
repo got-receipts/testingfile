@@ -19,6 +19,7 @@ SESSION_COOKIE = "budhub_session"
 APP_NAME = "Official BudHub"
 APP_TAGLINE = "The 518 cannabis delivery platform for Albany, Schenectady, Troy, and the wider Capital Region."
 CLEANUP_DONE = False
+EMPLOYEE_ROLES = {"banker", "dispatcher", "picker", "driver"}
 
 MENU_SECTIONS = ["Flower", "Edibles", "Concentrates", "General"]
 STORE_CATEGORY_OPTIONS = ["All"] + MENU_SECTIONS
@@ -1071,6 +1072,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS user_stats (
                 user_id INTEGER PRIMARY KEY,
+                is_employee INTEGER NOT NULL DEFAULT 0,
                 hourly_rate REAL NOT NULL DEFAULT 0,
                 total_trips INTEGER NOT NULL DEFAULT 0,
                 total_orders_picked INTEGER NOT NULL DEFAULT 0,
@@ -1104,6 +1106,7 @@ def init_db():
         ensure_column(connection, "support_tickets", "assigned_to INTEGER")
         ensure_column(connection, "guest_help_requests", "request_type TEXT NOT NULL DEFAULT 'REGISTRATION_HELP'")
         ensure_column(connection, "coupons", "uses_remaining INTEGER")
+        ensure_column(connection, "user_stats", "is_employee INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "products", "category TEXT NOT NULL DEFAULT 'General'")
         ensure_column(connection, "products", "image_url TEXT")
         ensure_column(connection, "products", "source_url TEXT")
@@ -1156,14 +1159,19 @@ def seed_defaults(connection):
 
 
 def seed_user_stats(connection):
-    for user in connection.execute("SELECT id FROM users").fetchall():
+    employee_roles = {"banker", "dispatcher", "picker", "driver"}
+    for user in connection.execute("SELECT id, role FROM users").fetchall():
         connection.execute(
             """
-            INSERT INTO user_stats (user_id, updated_at)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO NOTHING
+            INSERT INTO user_stats (user_id, is_employee, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                is_employee = CASE
+                    WHEN user_stats.is_employee = 0 AND excluded.is_employee = 1 THEN 1
+                    ELSE user_stats.is_employee
+                END
             """,
-            (user["id"], now_iso()),
+            (user["id"], 1 if user["role"] in employee_roles else 0, now_iso()),
         )
 
 
@@ -1567,14 +1575,29 @@ def user_stats_map(connection):
     return {row["user_id"]: row for row in rows}
 
 
+def default_employee_status(user_row, stats_row=None):
+    if stats_row:
+        return int(stats_row["is_employee"] or 0)
+    return 1 if user_row and user_row["role"] in EMPLOYEE_ROLES else 0
+
+
+def user_stat_number(stats_row, field_name, default=0):
+    if not stats_row:
+        return default
+    value = stats_row[field_name]
+    return default if value is None else value
+
+
 def ensure_user_stats_row(connection, user_id):
+    user = connection.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+    default_employee = 1 if user and user["role"] in EMPLOYEE_ROLES else 0
     connection.execute(
         """
-        INSERT INTO user_stats (user_id, updated_at)
-        VALUES (?, ?)
+        INSERT INTO user_stats (user_id, is_employee, updated_at)
+        VALUES (?, ?, ?)
         ON CONFLICT(user_id) DO NOTHING
         """,
-        (user_id, now_iso()),
+        (user_id, default_employee, now_iso()),
     )
 
 
@@ -1619,6 +1642,39 @@ def time_clock_summary(connection, user_id):
         (user_id,),
     ).fetchone()["hours"]
     return entries, weekly_hours or 0
+
+
+def payroll_snapshot(connection, users, user_stats):
+    payroll_rows = []
+    total_payroll = 0.0
+    total_hours = 0.0
+    for account in users:
+        stats_row = user_stats.get(account["id"])
+        if not default_employee_status(account, stats_row):
+            continue
+        _, weekly_hours = time_clock_summary(connection, account["id"])
+        hourly_rate = float(user_stat_number(stats_row, "hourly_rate", 0) or 0)
+        weekly_pay = round(weekly_hours * hourly_rate, 2)
+        total_hours += weekly_hours
+        total_payroll += weekly_pay
+        payroll_rows.append(
+            {
+                "user": account,
+                "hourly_rate": hourly_rate,
+                "weekly_hours": weekly_hours,
+                "weekly_pay": weekly_pay,
+                "total_trips": int(user_stat_number(stats_row, "total_trips", 0) or 0),
+                "total_orders_picked": int(user_stat_number(stats_row, "total_orders_picked", 0) or 0),
+                "total_orders_dispatched": int(user_stat_number(stats_row, "total_orders_dispatched", 0) or 0),
+            }
+        )
+    payroll_rows.sort(key=lambda row: (row["user"]["role"], row["user"]["name"].lower()))
+    return {
+        "rows": payroll_rows,
+        "employee_count": len(payroll_rows),
+        "total_payroll": round(total_payroll, 2),
+        "total_hours": round(total_hours, 2),
+    }
 
 
 def personal_activity_rows(connection, user_id, limit=12):
@@ -1953,7 +2009,6 @@ def render_account_recovery_widget(users, viewer_role):
 
 
 def render_account_management_widget(users, user_stats, viewer_role):
-    employee_roles = {"banker", "dispatcher", "picker", "driver"}
     title = "Engineer Account Manager" if viewer_role == "helpdesk" else "Admin Account Manager"
     return f"""
     <section class="panel">
@@ -1997,14 +2052,17 @@ def render_account_management_widget(users, user_stats, viewer_role):
                     <button type='submit'>Update Account</button>
                   </form>
                 </details>
-                <details class='details-panel{" is-hidden" if account["role"] not in employee_roles else ""}'>
+                <details class='details-panel'>
                   <summary>Employment Settings</summary>
-                  <form method='post' action='/users/stats-update' class='form-grid'>
+                  <form method='post' action='/users/stats-update' class='form-grid employee-settings-form' data-employee-form='user-{account["id"]}'>
                     <input type='hidden' name='user_id' value='{account['id']}'>
-                    <label>Hourly Rate<input type='number' name='hourly_rate' min='0' step='0.01' value='{(user_stats.get(account['id'])['hourly_rate'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                    <label>Total Trips<input type='number' name='total_trips' min='0' value='{(user_stats.get(account['id'])['total_trips'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                    <label>Total Orders Picked<input type='number' name='total_orders_picked' min='0' value='{(user_stats.get(account['id'])['total_orders_picked'] if user_stats.get(account['id']) else 0) or 0}'></label>
-                    <label>Total Orders Dispatched<input type='number' name='total_orders_dispatched' min='0' value='{(user_stats.get(account['id'])['total_orders_dispatched'] if user_stats.get(account['id']) else 0) or 0}'></label>
+                    <label class='checkbox-row employee-toggle-row'><input type='checkbox' name='employee_enabled' value='1' {'checked' if default_employee_status(account, user_stats.get(account['id'])) else ''} data-employee-toggle='user-{account["id"]}'><span>Mark this account as an employee</span></label>
+                    <div class='employee-settings-fields{" is-hidden" if not default_employee_status(account, user_stats.get(account['id'])) else ""}' data-employee-fields='user-{account["id"]}'>
+                      <label>Hourly Rate<input type='number' name='hourly_rate' min='0' step='0.01' value='{user_stat_number(user_stats.get(account['id']), "hourly_rate", 0) or 0}'></label>
+                      <label>Total Trips<input type='number' name='total_trips' min='0' value='{user_stat_number(user_stats.get(account['id']), "total_trips", 0) or 0}'></label>
+                      <label>Total Orders Picked<input type='number' name='total_orders_picked' min='0' value='{user_stat_number(user_stats.get(account['id']), "total_orders_picked", 0) or 0}'></label>
+                      <label>Total Orders Dispatched<input type='number' name='total_orders_dispatched' min='0' value='{user_stat_number(user_stats.get(account['id']), "total_orders_dispatched", 0) or 0}'></label>
+                    </div>
                     <button type='submit'>Save Employment Settings</button>
                   </form>
                 </details>
@@ -2037,6 +2095,94 @@ def render_account_management_widget(users, user_stats, viewer_role):
           modal.classList.remove('is-hidden');
         }});
         modal.querySelectorAll('[data-close-account-manager="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+        modal.querySelectorAll('[data-employee-toggle]').forEach(function (node) {{
+          var key = node.getAttribute('data-employee-toggle');
+          var fields = modal.querySelector('[data-employee-fields="' + key + '"]');
+          if (!fields) {{
+            return;
+          }}
+          function syncFields() {{
+            fields.classList.toggle('is-hidden', !node.checked);
+          }}
+          node.addEventListener('change', syncFields);
+          syncFields();
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_payroll_widget(payroll, viewer_role):
+    title = "Engineer Payroll Tools" if viewer_role == "helpdesk" else "Payroll Center"
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Payroll</span>
+          <h2>{html.escape(title)}</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-payroll-modal">Open Payroll Widget</button>
+      </div>
+      <div class="stats-row compact-stats">
+        <div class="stat-card"><span>Employees</span><strong>{payroll["employee_count"]}</strong></div>
+        <div class="stat-card"><span>Weekly Hours</span><strong>{payroll["total_hours"]:.2f}</strong></div>
+        <div class="stat-card"><span>Total Payroll</span><strong>{format_money(payroll["total_payroll"])}</strong></div>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="payroll-modal">
+      <div class="modal-backdrop" data-close-payroll="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Payroll Review</span>
+            <h3>{html.escape(title)}</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-payroll="yes">Close</button>
+        </div>
+        <div class="stats-row compact-stats">
+          <div class="stat-card"><span>Employees</span><strong>{payroll["employee_count"]}</strong></div>
+          <div class="stat-card"><span>Weekly Hours</span><strong>{payroll["total_hours"]:.2f}</strong></div>
+          <div class="stat-card"><span>Total Payroll</span><strong>{format_money(payroll["total_payroll"])}</strong></div>
+        </div>
+        <div class="order-card-grid">
+          {''.join(
+              f"""
+              <article class='order-card'>
+                <div class='order-card-head'>
+                  <div><span class='eyebrow'>{html.escape(ROLE_LABELS.get(row['user']['role'], row['user']['role']))}</span><h3>{html.escape(row['user']['name'])}</h3></div>
+                  <span class='menu-count'>{format_money(row['weekly_pay'])}</span>
+                </div>
+                <div class='order-meta'>
+                  <span>Email: {html.escape(row['user']['email'])}</span>
+                  <span>Hourly Rate: {format_money(row['hourly_rate'])}</span>
+                  <span>Weekly Hours: {row['weekly_hours']:.2f}</span>
+                  <span>Total Trips: {row['total_trips']}</span>
+                  <span>Orders Picked: {row['total_orders_picked']}</span>
+                  <span>Orders Dispatched: {row['total_orders_dispatched']}</span>
+                </div>
+              </article>
+              """
+              for row in payroll["rows"]
+          ) or "<p>No employees are enabled for payroll yet.</p>"}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-payroll-modal');
+        var modal = document.getElementById('payroll-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-payroll="yes"]').forEach(function (node) {{
           node.addEventListener('click', closeModal);
         }});
       }})();
@@ -3135,6 +3281,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     guest_help = guest_help_rows(connection)
     user_stats = user_stats_map(connection)
     finance = finance_snapshot(connection)
+    payroll = payroll_snapshot(connection, users, user_stats)
     verification_queue = connection.execute(
         """
         SELECT * FROM users
@@ -3228,6 +3375,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
         <div class="stat-card"><span>Delivered Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
       </div>
     </section>
+    {render_payroll_widget(payroll, user["role"])}
     {render_account_recovery_widget(users, user["role"])}
     <section class="admin-grid">
       <section class="panel">
@@ -4019,7 +4167,7 @@ def handle_update_order(environ, start_response, connection, user):
 
 
 def handle_update_user_account(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -4084,7 +4232,7 @@ def handle_clock_action(environ, start_response, connection, user):
 
 
 def handle_update_user_stats(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -4096,10 +4244,11 @@ def handle_update_user_stats(environ, start_response, connection, user):
     connection.execute(
         """
         UPDATE user_stats
-        SET hourly_rate = ?, total_trips = ?, total_orders_picked = ?, total_orders_dispatched = ?, updated_at = ?
+        SET is_employee = ?, hourly_rate = ?, total_trips = ?, total_orders_picked = ?, total_orders_dispatched = ?, updated_at = ?
         WHERE user_id = ?
         """,
         (
+            1 if data.get("employee_enabled") == "1" else 0,
             float(data.get("hourly_rate", "0") or 0),
             int(data.get("total_trips", "0") or 0),
             int(data.get("total_orders_picked", "0") or 0),
@@ -4114,7 +4263,7 @@ def handle_update_user_stats(environ, start_response, connection, user):
 
 
 def handle_engineer_recover_user(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -4139,7 +4288,7 @@ def handle_engineer_recover_user(environ, start_response, connection, user):
 
 
 def handle_engineer_delete_user(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
