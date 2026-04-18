@@ -1398,7 +1398,7 @@ def support_messages_map(connection, ticket_ids):
     return grouped
 
 
-def activity_log_rows(connection, where_clause="", params=()):
+def activity_log_rows(connection, where_clause="", params=(), trailing_clause=""):
     return connection.execute(
         f"""
         SELECT activity_logs.*,
@@ -1409,6 +1409,7 @@ def activity_log_rows(connection, where_clause="", params=()):
         LEFT JOIN users AS targets ON targets.id = activity_logs.target_user_id
         {where_clause}
         ORDER BY activity_logs.created_at DESC, activity_logs.id DESC
+        {trailing_clause}
         """,
         params,
     ).fetchall()
@@ -2483,7 +2484,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection)
     support = support_rows(connection)
     support_messages = support_messages_map(connection, [ticket["id"] for ticket in support])
-    activity_logs = activity_log_rows(connection, "LIMIT 40")
+    activity_logs = activity_log_rows(connection, trailing_clause="LIMIT 40")
     coupons = coupon_rows(connection)
     leafly_strains = leafly_strain_rows(connection)
     guest_help = guest_help_rows(connection)
