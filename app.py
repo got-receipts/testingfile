@@ -1,5 +1,6 @@
 import hashlib
 import html
+import mimetypes
 import os
 import secrets
 import sqlite3
@@ -17,7 +18,7 @@ UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "verification")
 PRODUCT_UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "products")
 SESSION_COOKIE = "budhub_session"
 APP_NAME = "Official BudHub"
-APP_TAGLINE = "The 518 cannabis delivery platform for Albany, Schenectady, Troy, and the wider Capital Region."
+APP_TAGLINE = "The 518 cannabis delivery platform for the wider Capital Region."
 CLEANUP_DONE = False
 EMPLOYEE_ROLES = {"banker", "dispatcher", "picker", "driver"}
 
@@ -577,7 +578,6 @@ def render_cart_widget(connection, user, filters):
       <div class="bag-list">{''.join(rows) if rows else '<p>Your bag is empty. Add something and keep browsing.</p>'}</div>
       <div class="checkout-total"><span>Subtotal</span><strong>{format_money(subtotal)}</strong></div>
       <div class="checkout-total"><span>Available Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
-      <div class="tracker-note">Checkout stays on the storefront now, so customers can review the bag while browsing.</div>
       <form method="post" action="/cart/checkout" class="form-grid bag-checkout">
         <input type="hidden" name="return_to" value="{html.escape(return_to)}">
         <label>How will you get it?
@@ -607,6 +607,22 @@ def slugify_name(value):
     while "--" in slug:
         slug = slug.replace("--", "-")
     return slug.strip("-")
+
+
+def normalized_name(value):
+    return " ".join((value or "").strip().lower().split())
+
+
+def name_exists(connection, name, exclude_user_id=None):
+    normalized = normalized_name(name)
+    if not normalized:
+        return False
+    query = "SELECT id FROM users WHERE LOWER(TRIM(name)) = ?"
+    params = [normalized]
+    if exclude_user_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_user_id)
+    return connection.execute(query, tuple(params)).fetchone() is not None
 
 
 def canonical_leafly_url(slug):
@@ -1209,6 +1225,8 @@ def render_nav(user, cart_count=0):
         if user["role"] == "client":
             links.append(f'<a href="/#bag-widget">Bag ({cart_count})</a>')
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-activity-widget">Activity</button>')
+        if user["role"] in {"banker", "dispatcher", "picker", "driver"}:
+            links.append('<button type="button" class="button ghost nav-activity-button" id="open-staff-activity-widget">Activity</button>')
         if user["role"] in {"admin", "helpdesk"}:
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-admin-activity-widget">Activity</button>')
         if user["role"] in {"admin", "helpdesk"}:
@@ -1270,7 +1288,11 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
 </html>"""
 
 
-def login_form(error=""):
+def login_form(error="", notice=""):
+    notice_script = ""
+    if notice:
+        escaped_notice = html.escape(notice).replace("'", "\\'")
+        notice_script = f"<script>window.setTimeout(function () {{ window.alert('{escaped_notice}'); }}, 80);</script>"
     return f"""
     <section class="panel narrow">
       <h2>Login</h2>
@@ -1298,9 +1320,8 @@ def login_form(error=""):
           <form method="post" action="/guest-help" class="form-grid">
             <input type="hidden" name="request_type" value="ACCOUNT_RECOVERY">
             <input type="hidden" name="return_to" value="/login">
-            <label>Name<input type="text" name="name" required></label>
             <label>Email<input type="email" name="email" required></label>
-            <label>Issue<textarea name="issue" required placeholder="Tell the engineers what happened with your login or password"></textarea></label>
+            <label>Reason<textarea name="issue" required placeholder="Tell the engineers what happened with your login or password"></textarea></label>
             <button type="submit">Send Password Recovery Request</button>
           </form>
         </div>
@@ -1323,6 +1344,7 @@ def login_form(error=""):
           }});
         }})();
       </script>
+      {notice_script}
     </section>
     """
 
@@ -1832,14 +1854,50 @@ def render_credit_issue_panel(connection):
     )
     return f"""
     <section class="panel">
-      <h2>Issue Credits</h2>
-      <form method="post" action="/credits/issue" class="form-grid">
-        <label>Customer<select name="user_id" required><option value="">Choose customer</option>{options}</select></label>
-        <label>Amount<input type="number" name="amount" min="0.01" step="0.01" required></label>
-        <label>Note<textarea name="note" required placeholder="Why are you adding credits?"></textarea></label>
-        <button type="submit">Issue Credits</button>
-      </form>
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Credits</span>
+          <h2>Issue Credits</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-credit-widget">Open Credit Widget</button>
+      </div>
     </section>
+    <div class="modal-shell is-hidden" id="credit-widget-modal">
+      <div class="modal-backdrop" data-close-credit-widget="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Credits</span>
+            <h3>Issue Credits</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-credit-widget="yes">Close</button>
+        </div>
+        <form method="post" action="/credits/issue" class="form-grid">
+          <label>Customer<select name="user_id" required><option value="">Choose customer</option>{options}</select></label>
+          <label>Amount<input type="number" name="amount" min="0.01" step="0.01" required></label>
+          <label>Note<textarea name="note" required placeholder="Why are you adding credits?"></textarea></label>
+          <button type="submit">Issue Credits</button>
+        </form>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-credit-widget');
+        var modal = document.getElementById('credit-widget-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-credit-widget="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
     """
 
 
@@ -1930,6 +1988,48 @@ def render_admin_activity_widget(connection, user):
           modal.classList.remove('is-hidden');
         }});
         modal.querySelectorAll('[data-close-admin-activity="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_staff_activity_widget(connection, user):
+    if not user or user["role"] not in {"banker", "dispatcher", "picker", "driver"}:
+        return ""
+    rows = personal_activity_rows(connection, user["id"], 12)
+    title = f"{ROLE_LABELS.get(user['role'], user['role'])} Activity"
+    return f"""
+    <div class="modal-shell is-hidden" id="staff-activity-widget">
+      <div class="modal-backdrop" data-close-staff-activity="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">{html.escape(ROLE_LABELS.get(user["role"], user["role"]))}</span>
+            <h3>{html.escape(title)}</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-staff-activity="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(row['actor_role'] or 'System')}</span><h3>{html.escape(row['action'])}</h3></div><span class='menu-count'>{html.escape(row['created_at'])}</span></div><div class='reason-box'>{html.escape(row['details'] or 'No extra details provided.')}</div></article>" for row in rows) or '<p>No activity logged yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-staff-activity-widget');
+        var modal = document.getElementById('staff-activity-widget');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-staff-activity="yes"]').forEach(function (node) {{
           node.addEventListener('click', closeModal);
         }});
       }})();
@@ -2190,6 +2290,131 @@ def render_payroll_widget(payroll, viewer_role):
     """
 
 
+def render_admin_creation_widgets(leafly_strains, coupons):
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Admin Actions</span>
+          <h2>Creation Widgets</h2>
+        </div>
+      </div>
+      <div class="widget-button-row">
+        <button type="button" class="button" id="open-create-account-widget">Create Account</button>
+        <button type="button" class="button ghost" id="open-create-product-widget">Add Menu Item</button>
+        <button type="button" class="button ghost" id="open-create-coupon-widget">Create Coupon</button>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="create-account-widget-modal">
+      <div class="modal-backdrop" data-close-create-account-widget="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Accounts</span>
+            <h3>Create Team Member or Customer</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-create-account-widget="yes">Close</button>
+        </div>
+        <form method="post" action="/users/create" class="form-grid">
+          <label>Name<input type="text" name="name" required></label>
+          <label>Email<input type="email" name="email" required></label>
+          <label>Password<input type="password" name="password" minlength="6" required></label>
+          <label>Role<select name="role"><option value="client">Customer</option><option value="banker">In-House Bank</option><option value="dispatcher">Dispatch Lead</option><option value="picker">Inventory Picker</option><option value="driver">Driver</option><option value="admin">Admin</option><option value="helpdesk">Budhub Helpdesk</option></select></label>
+          <button type="submit">Create Account</button>
+        </form>
+      </div>
+    </div>
+    <div class="modal-shell is-hidden" id="create-product-widget-modal">
+      <div class="modal-backdrop" data-close-create-product-widget="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Catalog</span>
+            <h3>Add Menu Item</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-create-product-widget="yes">Close</button>
+        </div>
+        <form method="post" action="/products/create" class="form-grid">
+          <label>Name<input type="text" name="name" required></label>
+          <label>Category
+            <select name="category">
+              <option value="Edibles">Edibles</option>
+              <option value="Concentrates">Concentrates</option>
+              <option value="Flower">Flower</option>
+              <option value="General">General</option>
+            </select>
+          </label>
+          <label>Sub Menu Label<input type="text" name="menu_group" placeholder="Example: Double Stuffed 7G, Diamonds, Syrup"></label>
+          <label>Strain Type
+            <select name="strain_type">
+              <option value="Unspecified">Unspecified</option>
+              <option value="Sativa">Sativa</option>
+              <option value="Indica">Indica</option>
+              <option value="Hybrid">Hybrid</option>
+            </select>
+          </label>
+          <label>Leafly Strain
+            <select name="leafly_strain_id">
+              <option value="">Choose Leafly strain reference</option>
+              {''.join(f"<option value='{strain['id']}'>{html.escape(strain['name'])} ({html.escape(strain['strain_type'])})</option>" for strain in leafly_strains)}
+            </select>
+          </label>
+          <label>Price<input type="number" name="price" min="0.01" step="0.01" required></label>
+          <label>Stock<input type="number" name="stock" min="0" required></label>
+          <label>Description<textarea name="description" required></textarea></label>
+          <button type="submit">Create Menu Item</button>
+        </form>
+      </div>
+    </div>
+    <div class="modal-shell is-hidden" id="create-coupon-widget-modal">
+      <div class="modal-backdrop" data-close-create-coupon-widget="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Coupons</span>
+            <h3>Create Coupon</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-create-coupon-widget="yes">Close</button>
+        </div>
+        <form method="post" action="/coupons/create" class="form-grid">
+          <label>Code<input type="text" name="code" required></label>
+          <label>Type<select name="discount_type"><option value="FLAT">Flat Amount</option><option value="PERCENT">Percent</option></select></label>
+          <label>Value<input type="number" name="discount_value" min="0.01" step="0.01" required></label>
+          <label>Uses Remaining<input type="number" name="uses_remaining" min="0" placeholder="Leave blank for unlimited"></label>
+          <button type="submit">Create Coupon</button>
+        </form>
+        <div class="order-card-grid">
+          {''.join(f"<form method='post' action='/coupons/delete' class='item-pill inline-pill-form'><strong>{html.escape(coupon['code'])}</strong><span>{html.escape(coupon['discount_type'])} {coupon['discount_value']}</span><span>{html.escape(coupon_usage_label(coupon))}</span><span>{'Active' if coupon['active'] else 'Inactive'}</span><input type='hidden' name='coupon_id' value='{coupon['id']}'><button type='submit' class='button ghost'>Delete</button></form>" for coupon in coupons) or '<p>No coupons yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        [
+          ['open-create-account-widget', 'create-account-widget-modal', 'data-close-create-account-widget'],
+          ['open-create-product-widget', 'create-product-widget-modal', 'data-close-create-product-widget'],
+          ['open-create-coupon-widget', 'create-coupon-widget-modal', 'data-close-create-coupon-widget']
+        ].forEach(function (config) {{
+          var openButton = document.getElementById(config[0]);
+          var modal = document.getElementById(config[1]);
+          if (!openButton || !modal) {{
+            return;
+          }}
+          function closeModal() {{
+            modal.classList.add('is-hidden');
+          }}
+          openButton.addEventListener('click', function () {{
+            modal.classList.remove('is-hidden');
+          }});
+          modal.querySelectorAll('[' + config[2] + '="yes"]').forEach(function (node) {{
+            node.addEventListener('click', closeModal);
+          }});
+        }});
+      }})();
+    </script>
+    """
+
+
 def render_staff_clock_panel(connection, user):
     if user["role"] in {"client", "admin", "helpdesk"}:
         return ""
@@ -2257,6 +2482,7 @@ def render_tracker(status):
     if status == "CANCELED":
         return "<div class='tracker-note canceled-note'>This ticket was canceled.</div>"
     current = tracker_index(status)
+    progress = 0 if current <= 0 else min(100, int((current / max(1, len(TRACKER) - 1)) * 100))
     blocks = []
     for index, step in enumerate(TRACKER):
         classes = ["tracker-step"]
@@ -2273,7 +2499,14 @@ def render_tracker(status):
         extra = "<div class='tracker-note'>Dispatch assigned a driver. Delivery can only close after payment is verified.</div>"
     if status == "READY_FOR_PICKUP":
         extra = "<div class='tracker-note'>This order is waiting for an in-person pickup handoff.</div>"
-    return f"<div class='tracker'>{''.join(blocks)}</div>{extra}"
+    rabbit = f"""
+    <div class='tracker-rabbit-lane'>
+      <div class='tracker-rabbit-runner' style='left: calc({progress}% - 24px);'>
+        <img src='/static/budhub-logo.png' alt='BudHub rabbit logo' class='tracker-rabbit-logo'>
+      </div>
+    </div>
+    """
+    return f"{rabbit}<div class='tracker'>{''.join(blocks)}</div>{extra}"
 
 
 def render_item_list(items):
@@ -2547,7 +2780,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
             <source src="/static/rolling_banner.mp4" type="video/mp4">
           </video>
           <div class="hero-video-overlay">
-            <span class="eyebrow">518 Brand Reel</span>
             <strong>Official BudHub</strong>
             <span>Capital Region cannabis delivery, built by locals for locals.</span>
           </div>
@@ -3151,9 +3383,8 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Visible Tickets</span><strong>{len(tickets)}</strong></div>
     </section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
-    {render_activity_list(connection, user["id"], title="Your Picking Activity")}
     """
-    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
+    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user))
 
 
 def render_driver_dashboard(connection, user, message=None, level="info"):
@@ -3240,9 +3471,8 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Live Deliveries</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'OUT_FOR_DELIVERY')}</strong></div>
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
-    {render_activity_list(connection, user["id"], title="Your Driver Activity")}
     """
-    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
+    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user))
 
 
 def render_admin_home(connection, user, message=None, level="info"):
@@ -3378,64 +3608,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     {render_payroll_widget(payroll, user["role"])}
     {render_account_recovery_widget(users, user["role"])}
     <section class="admin-grid">
-      <section class="panel">
-        <h2>Create Team Member or Customer</h2>
-        <form method="post" action="/users/create" class="form-grid">
-          <label>Name<input type="text" name="name" required></label>
-          <label>Email<input type="email" name="email" required></label>
-          <label>Password<input type="password" name="password" minlength="6" required></label>
-          <label>Role<select name="role"><option value="client">Customer</option><option value="banker">In-House Bank</option><option value="dispatcher">Dispatch Lead</option><option value="picker">Inventory Picker</option><option value="driver">Driver</option><option value="admin">Admin</option><option value="helpdesk">Budhub Helpdesk</option></select></label>
-          <button type="submit">Create Account</button>
-        </form>
-      </section>
-      <section class="panel">
-        <h2>Add Menu Item</h2>
-        <form method="post" action="/products/create" class="form-grid">
-          <label>Name<input type="text" name="name" required></label>
-          <label>Category
-            <select name="category">
-              <option value="Edibles">Edibles</option>
-              <option value="Concentrates">Concentrates</option>
-              <option value="Flower">Flower</option>
-              <option value="General">General</option>
-            </select>
-          </label>
-          <label>Sub Menu Label<input type="text" name="menu_group" placeholder="Example: Double Stuffed 7G, Diamonds, Syrup"></label>
-          <label>Strain Type
-            <select name="strain_type">
-              <option value="Unspecified">Unspecified</option>
-              <option value="Sativa">Sativa</option>
-              <option value="Indica">Indica</option>
-              <option value="Hybrid">Hybrid</option>
-            </select>
-          </label>
-          <label>Leafly Strain
-            <select name="leafly_strain_id">
-              <option value="">Choose Leafly strain reference</option>
-              {''.join(f"<option value='{strain['id']}'>{html.escape(strain['name'])} ({html.escape(strain['strain_type'])})</option>" for strain in leafly_strains)}
-            </select>
-          </label>
-          <label>Price<input type="number" name="price" min="0.01" step="0.01" required></label>
-          <label>Stock<input type="number" name="stock" min="0" required></label>
-          <label>Description<textarea name="description" required></textarea></label>
-          <button type="submit">Create Menu Item</button>
-        </form>
-      </section>
-    </section>
-    <section class="admin-grid">
-      <section class="panel">
-        <h2>Create Coupon</h2>
-        <form method="post" action="/coupons/create" class="form-grid">
-          <label>Code<input type="text" name="code" required></label>
-          <label>Type<select name="discount_type"><option value="FLAT">Flat Amount</option><option value="PERCENT">Percent</option></select></label>
-          <label>Value<input type="number" name="discount_value" min="0.01" step="0.01" required></label>
-          <label>Uses Remaining<input type="number" name="uses_remaining" min="0" placeholder="Leave blank for unlimited"></label>
-          <button type="submit">Create Coupon</button>
-        </form>
-        <div class="order-card-grid">
-          {''.join(f"<form method='post' action='/coupons/delete' class='item-pill inline-pill-form'><strong>{html.escape(coupon['code'])}</strong><span>{html.escape(coupon['discount_type'])} {coupon['discount_value']}</span><span>{html.escape(coupon_usage_label(coupon))}</span><span>{'Active' if coupon['active'] else 'Inactive'}</span><input type='hidden' name='coupon_id' value='{coupon['id']}'><button type='submit' class='button ghost'>Delete</button></form>" for coupon in coupons) or '<p>No coupons yet.</p>'}
-        </div>
-      </section>
+      {render_admin_creation_widgets(leafly_strains, coupons)}
       {render_credit_issue_panel(connection)}
     </section>
     <section class="panel">
@@ -3630,11 +3803,16 @@ def handle_register(environ, start_response, connection):
         data = read_post_data(environ)
         files = {}
     email = data.get("email", "").lower()
+    name = data.get("name", "").strip()
     password = data.get("password", "")
+    if not name:
+        return text_response(start_response, page("Register", register_form("Name is required.")))
     if len(password) < 6:
         return text_response(start_response, page("Register", register_form("Password must be at least 6 characters long.")))
     if connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
         return text_response(start_response, page("Register", register_form("That email already has an account.")))
+    if name_exists(connection, name):
+        return text_response(start_response, page("Register", register_form("That name already has an account. Use a different account name.")))
     required_files = {"id_front", "id_back", "id_selfie"}
     if not all(key in files for key in required_files):
         return text_response(start_response, page("Register", register_form("ID front, ID back, and selfie holding ID are all required.")))
@@ -3644,7 +3822,7 @@ def handle_register(environ, start_response, connection):
             name, email, password_hash, role, account_state, verification_status, verification_note, created_at
         ) VALUES (?, ?, ?, 'client', 'PENDING_VERIFICATION', 'PENDING_REVIEW', ?, ?)
         """,
-        (data.get("name", ""), email, hash_password(password), "Awaiting ID verification.", now_iso()),
+        (name, email, hash_password(password), "Awaiting ID verification.", now_iso()),
     )
     user_id = cursor.lastrowid
     try:
@@ -3670,7 +3848,7 @@ def handle_register(environ, start_response, connection):
 
 
 def handle_create_product(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -3705,7 +3883,7 @@ def handle_create_product(environ, start_response, connection, user):
 
 
 def handle_create_coupon(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -3746,7 +3924,7 @@ def handle_delete_coupon(environ, start_response, connection, user):
 
 
 def handle_issue_credit(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin", "dispatcher", "banker"})
+    gate = require_role(start_response, user, {"admin", "helpdesk", "dispatcher", "banker"})
     if gate:
         return gate
     data = read_post_data(environ)
@@ -3772,20 +3950,28 @@ def handle_issue_credit(environ, start_response, connection, user):
 
 
 def handle_create_user(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
         return gate
     data = read_post_data(environ)
+    name = data.get("name", "").strip()
     email = data.get("email", "").lower()
+    password = data.get("password", "")
+    if not name:
+        return redirect(start_response, "/admin?message=Account name is required")
     if connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
         return redirect(start_response, "/admin?message=Account already exists")
+    if name_exists(connection, name):
+        return redirect(start_response, "/admin?message=An account with that name already exists")
+    if len(password) < 6:
+        return redirect(start_response, "/admin?message=Password must be at least 6 characters long")
     connection.execute(
         """
         INSERT INTO users (
             name, email, password_hash, role, account_state, verification_status, verified_at, created_at
         ) VALUES (?, ?, ?, ?, 'ACTIVE', 'VERIFIED', ?, ?)
         """,
-        (data.get("name", ""), email, hash_password(data.get("password", "")), data.get("role", "client"), now_iso(), now_iso()),
+        (name, email, hash_password(password), data.get("role", "client"), now_iso(), now_iso()),
     )
     created = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
     log_activity(connection, user, "CREATE_USER", f"Created {data.get('role', 'client')} account for {email}.", target_user_id=created["id"] if created else None)
@@ -3821,19 +4007,26 @@ def handle_create_support_ticket(environ, start_response, connection, user):
 
 def handle_guest_help_request(environ, start_response, connection):
     data = read_post_data(environ)
-    if not data.get("name", "").strip() or not data.get("email", "").strip() or not data.get("issue", "").strip():
-        return redirect(start_response, f"{data.get('return_to', '/register')}?message=Name, email, and issue are required")
     request_type = data.get("request_type", "REGISTRATION_HELP").strip() or "REGISTRATION_HELP"
+    email = data.get("email", "").strip().lower()
+    issue = data.get("issue", "").strip()
+    submitted_name = data.get("name", "").strip()
+    if request_type == "ACCOUNT_RECOVERY":
+        if not email or not issue:
+            return redirect(start_response, f"{data.get('return_to', '/login')}?message=Email and reason are required")
+        submitted_name = "Account Recovery Request"
+    elif not submitted_name or not email or not issue:
+        return redirect(start_response, f"{data.get('return_to', '/register')}?message=Name, email, and issue are required")
     connection.execute(
         """
         INSERT INTO guest_help_requests (name, email, issue, request_type, status, response_note, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'OPEN', '', ?, ?)
         """,
-        (data.get("name", "").strip(), data.get("email", "").strip().lower(), data.get("issue", "").strip(), request_type, now_iso(), now_iso()),
+        (submitted_name, email, issue, request_type, now_iso(), now_iso()),
     )
     connection.commit()
     destination = data.get("return_to", "/register") or "/register"
-    success_message = "Password recovery request sent to engineer dashboard" if request_type == "ACCOUNT_RECOVERY" else "Registration help request sent"
+    success_message = "Account engineer will be with you shortly" if request_type == "ACCOUNT_RECOVERY" else "Registration help request sent"
     return redirect(start_response, f"{destination}?message={success_message}")
 
 
@@ -4445,7 +4638,9 @@ def serve_static(environ, start_response):
         return text_response(start_response, "Not found", status="404 Not Found", content_type="text/plain; charset=utf-8")
     with open(file_path, "rb") as handle:
         content = handle.read()
-    content_type = "text/css; charset=utf-8" if file_path.endswith(".css") else "text/plain; charset=utf-8"
+    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    if content_type.startswith("text/"):
+        content_type = f"{content_type}; charset=utf-8"
     start_response("200 OK", [("Content-Type", content_type)])
     return [content]
 
@@ -4465,9 +4660,12 @@ def application(environ, start_response):
         if path == "/" and method == "GET":
             return text_response(start_response, render_store_page(connection, user=user, message=message, filters=params))
         if path == "/login":
-            return handle_login(environ, start_response, connection) if method == "POST" else text_response(start_response, page("Login", login_form(), user=user))
+            if method == "POST":
+                return handle_login(environ, start_response, connection)
+            notice = message if message == "Account engineer will be with you shortly" else ""
+            return text_response(start_response, page("Login", login_form(notice=notice), user=user, message=message))
         if path == "/register":
-            return handle_register(environ, start_response, connection) if method == "POST" else text_response(start_response, page("Register", register_form(), user=user))
+            return handle_register(environ, start_response, connection) if method == "POST" else text_response(start_response, page("Register", register_form(), user=user, message=message))
         if path == "/guest-help" and method == "POST":
             return handle_guest_help_request(environ, start_response, connection)
         if path == "/logout":
