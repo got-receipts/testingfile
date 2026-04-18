@@ -38,6 +38,47 @@ a {
   display: none !important;
 }
 
+.modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 640px);
+  max-height: calc(100vh - 2.5rem);
+  overflow: auto;
+  padding: 1.35rem 1.4rem;
+  border-radius: 24px;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.14)),
+    var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.login-support-row {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.modal-close {
+  min-width: 92px;
+}
+
 .site-header {
   display: flex;
   justify-content: space-between;

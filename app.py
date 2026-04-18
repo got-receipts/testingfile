@@ -1268,18 +1268,48 @@ def login_form(error=""):
         <label>Password<input type="password" name="password" required></label>
         <button type="submit">Sign In</button>
       </form>
-      <div class="demo-box" id="login-recovery">
-        <strong>Forgot password or locked out?</strong>
-        <p class="demo-note">Send an account recovery request directly to the BudHub engineers. It will appear in the engineer dashboard for login recovery review.</p>
-        <form method="post" action="/guest-help" class="form-grid">
-          <input type="hidden" name="request_type" value="ACCOUNT_RECOVERY">
-          <input type="hidden" name="return_to" value="/login">
-          <label>Name<input type="text" name="name" required></label>
-          <label>Email<input type="email" name="email" required></label>
-          <label>Issue<textarea name="issue" required placeholder="Tell the engineers what happened with your login or password"></textarea></label>
-          <button type="submit" class="button ghost">Send Password Recovery Request</button>
-        </form>
+      <div class="login-support-row">
+        <button type="button" class="button ghost" id="open-recovery-modal">Forgot password or locked out?</button>
       </div>
+      <div class="modal-shell is-hidden" id="recovery-modal">
+        <div class="modal-backdrop" data-close-recovery="yes"></div>
+        <div class="modal-card">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">Engineer Recovery</span>
+              <h3>Account Recovery Request</h3>
+            </div>
+            <button type="button" class="button ghost modal-close" data-close-recovery="yes">Close</button>
+          </div>
+          <p class="demo-note">Send an account recovery request directly to the BudHub engineers. This creates a recovery ticket in the engineer dashboard.</p>
+          <form method="post" action="/guest-help" class="form-grid">
+            <input type="hidden" name="request_type" value="ACCOUNT_RECOVERY">
+            <input type="hidden" name="return_to" value="/login">
+            <label>Name<input type="text" name="name" required></label>
+            <label>Email<input type="email" name="email" required></label>
+            <label>Issue<textarea name="issue" required placeholder="Tell the engineers what happened with your login or password"></textarea></label>
+            <button type="submit">Send Password Recovery Request</button>
+          </form>
+        </div>
+      </div>
+      <script>
+        (function () {{
+          var openButton = document.getElementById('open-recovery-modal');
+          var modal = document.getElementById('recovery-modal');
+          if (!openButton || !modal) {{
+            return;
+          }}
+          function closeModal() {{
+            modal.classList.add('is-hidden');
+          }}
+          openButton.addEventListener('click', function () {{
+            modal.classList.remove('is-hidden');
+          }});
+          modal.querySelectorAll('[data-close-recovery="yes"]').forEach(function (node) {{
+            node.addEventListener('click', closeModal);
+          }});
+        }})();
+      </script>
     </section>
     """
 
