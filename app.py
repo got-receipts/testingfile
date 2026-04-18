@@ -307,6 +307,7 @@ LAUNCH_MENU = [
 ]
 
 ROLE_LABELS = {
+    "helpdesk": "Budhub Helpdesk",
     "admin": "Admin",
     "banker": "In-House Bank",
     "dispatcher": "Dispatch Lead",
@@ -328,6 +329,28 @@ STATUS_LABELS = {
 
 TRACKER = ["PACKING", "READY_FOR_DISPATCH", "OUT_FOR_DELIVERY", "DELIVERED"]
 BLOCK_SIZE = 5
+LEAFLY_STRAIN_LIBRARY = [
+    {"name": "Afghan Kush", "slug": "afghan-kush", "type": "Indica", "image_url": "https://images.leafly.com/flower-images/defaults/long-fluffy-wispy/strain-7.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Animal Mints", "slug": "animal-mints", "type": "Hybrid", "image_url": "https://leafly-public.imgix.net/strains/photos/IaYQshrPTxiD2BOWHO1n_AnimalMints.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Blue Nerds", "slug": "blue-nerds", "type": "Hybrid"},
+    {"name": "Candy Fumes", "slug": "brands/cannalicious-labs/products/cannalicious-labs-candy-fumez-crumble-hybrid-solvent", "type": "Hybrid"},
+    {"name": "Cotton Candy", "slug": "cotton-candy", "type": "Hybrid"},
+    {"name": "Electric Lemon", "slug": "electric-lemon-g", "type": "Sativa"},
+    {"name": "Frozen Runtz", "slug": "frozen-runtz", "type": "Hybrid"},
+    {"name": "Garlic Breath", "slug": "garlic-breath", "type": "Hybrid"},
+    {"name": "Gorilla Glue #4", "slug": "original-glue", "type": "Hybrid"},
+    {"name": "LA Confidential", "slug": "la-confidential", "type": "Indica", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-5.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Lemon Cherry Gelato", "slug": "lemon-cherry-gelato", "type": "Hybrid"},
+    {"name": "Maui Gushers", "slug": "maui-gushers", "type": "Hybrid"},
+    {"name": "Obama Runtz", "slug": "obama-runtz", "type": "Hybrid"},
+    {"name": "Pineapple Express", "slug": "pineapple-express", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/pineapple-express.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Pink Mimosas", "slug": "pink-mimosa", "type": "Hybrid"},
+    {"name": "Purple Haze", "slug": "purple-haze", "type": "Sativa", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-10.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Sour Candy", "slug": "sour-diesel", "type": "Hybrid", "image_url": "https://leafly-public.imgix.net/strains/photos/5SPDG4T4TcSO8PgLgWHO_SourDiesel_AdobeStock_171888473.jpg?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Strawberry Gumbo", "slug": "strains/strawberry-gum", "type": "Hybrid"},
+    {"name": "Sundae Driver", "slug": "sundae-driver", "type": "Hybrid", "image_url": "https://images.leafly.com/flower-images/defaults/purple/strain-17.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+    {"name": "Super Sour Diesel", "slug": "super-sour-diesel", "type": "Sativa", "image_url": "https://images.leafly.com/flower-images/defaults/generic/strain-22.png?auto=compress&w=1200&h=630&fit=crop&bg=FFFFFF&fit=fill"},
+]
 
 
 def db_connection():
@@ -576,6 +599,62 @@ def slugify_name(value):
     return slug.strip("-")
 
 
+def canonical_leafly_url(slug):
+    if not slug:
+        return ""
+    if slug.startswith("http://") or slug.startswith("https://"):
+        return slug
+    if slug.startswith("strains/") or slug.startswith("brands/"):
+        return f"https://www.leafly.com/{slug}"
+    return f"https://www.leafly.com/strains/{slug}"
+
+
+def seed_leafly_strains(connection):
+    for strain in LEAFLY_STRAIN_LIBRARY:
+        connection.execute(
+            """
+            INSERT INTO leafly_strains (name, slug, source_url, strain_type, image_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                slug = excluded.slug,
+                source_url = excluded.source_url,
+                strain_type = excluded.strain_type,
+                image_url = COALESCE(excluded.image_url, leafly_strains.image_url)
+            """,
+            (
+                strain["name"],
+                strain["slug"],
+                canonical_leafly_url(strain["slug"]),
+                strain["type"],
+                strain.get("image_url"),
+                now_iso(),
+            ),
+        )
+
+
+def leafly_strain_rows(connection):
+    return connection.execute("SELECT * FROM leafly_strains ORDER BY name COLLATE NOCASE ASC").fetchall()
+
+
+def infer_leafly_reference(connection, product_name):
+    cleaned = (
+        product_name.replace(" DS 7G", "")
+        .replace(" Smalls", "")
+        .replace(" OZ", "")
+        .strip()
+    )
+    direct = connection.execute(
+        "SELECT * FROM leafly_strains WHERE lower(name) = lower(?)",
+        (cleaned,),
+    ).fetchone()
+    if direct:
+        return direct
+    for row in leafly_strain_rows(connection):
+        if row["name"].lower() in cleaned.lower() or cleaned.lower() in row["name"].lower():
+            return row
+    return None
+
+
 def parse_cookies(environ):
     jar = cookies.SimpleCookie()
     if environ.get("HTTP_COOKIE"):
@@ -683,13 +762,19 @@ def ensure_column(connection, table_name, definition):
 def sync_launch_menu(connection):
     launch_names = {item["name"] for item in LAUNCH_MENU}
     for item in LAUNCH_MENU:
+        leafly_reference = infer_leafly_reference(connection, item["name"])
         menu_group, strain_type = infer_product_metadata(item["name"], item["category"], item["description"])
+        if leafly_reference and item["category"] in {"Flower", "Concentrates"}:
+            item.setdefault("source_url", leafly_reference["source_url"])
+            item.setdefault("image_url", leafly_reference["image_url"])
+            if strain_type == "Unspecified":
+                strain_type = normalize_strain_type(leafly_reference["strain_type"])
         existing = connection.execute("SELECT id FROM products WHERE name = ?", (item["name"],)).fetchone()
         if existing:
             connection.execute(
                 """
                 UPDATE products
-                SET category = ?, description = ?, image_url = ?, source_url = ?, price = ?, stock = ?, menu_group = ?, strain_type = ?
+                SET category = ?, description = ?, image_url = ?, source_url = ?, leafly_strain_name = ?, price = ?, stock = ?, menu_group = ?, strain_type = ?
                 WHERE id = ?
                 """,
                 (
@@ -697,6 +782,7 @@ def sync_launch_menu(connection):
                     item["description"],
                     item.get("image_url"),
                     item.get("source_url"),
+                    leafly_reference["name"] if leafly_reference else None,
                     item["price"],
                     item["stock"],
                     menu_group,
@@ -707,8 +793,8 @@ def sync_launch_menu(connection):
         else:
             connection.execute(
                 """
-                INSERT INTO products (name, category, description, image_url, source_url, price, stock, menu_group, strain_type, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO products (name, category, description, image_url, source_url, leafly_strain_name, price, stock, menu_group, strain_type, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item["name"],
@@ -716,6 +802,7 @@ def sync_launch_menu(connection):
                     item["description"],
                     item.get("image_url"),
                     item.get("source_url"),
+                    leafly_reference["name"] if leafly_reference else None,
                     item["price"],
                     item["stock"],
                     menu_group,
@@ -815,10 +902,21 @@ def init_db():
                 description TEXT NOT NULL,
                 image_url TEXT,
                 source_url TEXT,
+                leafly_strain_name TEXT,
                 price REAL NOT NULL,
                 stock INTEGER NOT NULL,
                 menu_group TEXT NOT NULL DEFAULT '',
                 strain_type TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS leafly_strains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                slug TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                strain_type TEXT NOT NULL DEFAULT 'Unspecified',
+                image_url TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -892,16 +990,52 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 opened_by INTEGER NOT NULL,
                 category TEXT NOT NULL,
+                subject TEXT,
                 priority TEXT NOT NULL DEFAULT 'NORMAL',
                 related_ticket_id INTEGER,
                 reason TEXT NOT NULL,
                 status TEXT NOT NULL,
                 resolution_note TEXT,
+                assigned_to INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (opened_by) REFERENCES users(id),
-                FOREIGN KEY (related_ticket_id) REFERENCES tickets(id)
+                FOREIGN KEY (related_ticket_id) REFERENCES tickets(id),
+                FOREIGN KEY (assigned_to) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                support_ticket_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (support_ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE,
+                FOREIGN KEY (author_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER,
+                actor_role TEXT,
+                target_user_id INTEGER,
+                action TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (actor_id) REFERENCES users(id),
+                FOREIGN KEY (target_user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS guest_help_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                issue TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                response_note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS coupons (
@@ -936,9 +1070,12 @@ def init_db():
         ensure_column(connection, "users", "verified_at TEXT")
         ensure_column(connection, "support_tickets", "priority TEXT NOT NULL DEFAULT 'NORMAL'")
         ensure_column(connection, "support_tickets", "related_ticket_id INTEGER")
+        ensure_column(connection, "support_tickets", "subject TEXT")
+        ensure_column(connection, "support_tickets", "assigned_to INTEGER")
         ensure_column(connection, "products", "category TEXT NOT NULL DEFAULT 'General'")
         ensure_column(connection, "products", "image_url TEXT")
         ensure_column(connection, "products", "source_url TEXT")
+        ensure_column(connection, "products", "leafly_strain_name TEXT")
         ensure_column(connection, "products", "menu_group TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "products", "strain_type TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "tickets", "fulfillment_type TEXT NOT NULL DEFAULT 'DELIVERY'")
@@ -947,6 +1084,7 @@ def init_db():
         ensure_column(connection, "tickets", "credit_applied REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "delivery_block_id INTEGER")
 
+        seed_leafly_strains(connection)
         seed_defaults(connection)
         if not CLEANUP_DONE:
             cleanup_generated_tickets(connection)
@@ -956,6 +1094,7 @@ def init_db():
 
 def seed_defaults(connection):
     users = [
+        ("Budhub Helpdesk", "helpdesk@ecommerce.local", "helpdesk123", "helpdesk"),
         ("System Admin", "admin@ecommerce.local", "admin123", "admin"),
         ("Budhub Bank", "bank@ecommerce.local", "bank123", "banker"),
         ("Dispatch Lead", "dispatcher@ecommerce.local", "dispatch123", "dispatcher"),
@@ -1004,13 +1143,19 @@ def flash_message(message, level="info"):
     return f'<div class="flash flash-{html.escape(level)}">{html.escape(message)}</div>'
 
 
+def render_help_button(user):
+    if user:
+        return '<a class="support-fab" href="/help">Budhub Help</a>'
+    return '<a class="support-fab" href="/register#support-access">Need Help?</a>'
+
+
 def render_nav(user, cart_count=0):
     links = ['<a href="/">Menu</a>']
     if user:
         links.append('<a href="/dashboard">Dashboard</a>')
         if user["role"] == "client":
             links.append(f'<a href="/#bag-widget">Bag ({cart_count})</a>')
-        if user["role"] == "admin":
+        if user["role"] in {"admin", "helpdesk"}:
             links.append('<a href="/admin">Admin</a>')
         links.append(f'<span class="nav-user">{html.escape(user["name"])} ({html.escape(ROLE_LABELS.get(user["role"], user["role"]))})</span>')
         links.append('<a class="button ghost" href="/logout">Logout</a>')
@@ -1041,6 +1186,7 @@ def page(title, body, user=None, message=None, level="info", cart_count=0):
     {flash_message(message, level)}
     {body}
   </main>
+  {render_help_button(user)}
 </body>
 </html>"""
 
@@ -1075,6 +1221,16 @@ def register_form(error=""):
         <label>Selfie Holding ID<input type="file" name="id_selfie" accept="image/*" required></label>
         <button type="submit">Create Account</button>
       </form>
+      <div class="demo-box" id="support-access">
+        <strong>Need help with registration?</strong>
+        <p class="demo-note">Use this form if you are blocked before you can finish account creation. After you have an account, the discreet Budhub Help button opens your full message thread.</p>
+        <form method="post" action="/guest-help" class="form-grid">
+          <label>Name<input type="text" name="name" required></label>
+          <label>Email<input type="email" name="email" required></label>
+          <label>Issue<textarea name="issue" required placeholder="Explain what is stopping you from creating or using your account"></textarea></label>
+          <button type="submit" class="button ghost">Send Registration Help Request</button>
+        </form>
+      </div>
     </section>
     """
 
@@ -1165,16 +1321,77 @@ def support_rows(connection, where_clause="", params=()):
                users.name AS user_name,
                users.email AS user_email,
                openers.name AS opened_by_name,
+               assignees.name AS assigned_to_name,
                tickets.ticket_number AS related_ticket_number
         FROM support_tickets
         JOIN users ON users.id = support_tickets.user_id
         JOIN users AS openers ON openers.id = support_tickets.opened_by
+        LEFT JOIN users AS assignees ON assignees.id = support_tickets.assigned_to
         LEFT JOIN tickets ON tickets.id = support_tickets.related_ticket_id
         {where_clause}
         ORDER BY support_tickets.updated_at DESC, support_tickets.id DESC
         """,
         params,
     ).fetchall()
+
+
+def support_messages_map(connection, ticket_ids):
+    if not ticket_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ticket_ids)
+    rows = connection.execute(
+        f"""
+        SELECT support_messages.*, users.name AS author_name, users.role AS author_role
+        FROM support_messages
+        JOIN users ON users.id = support_messages.author_id
+        WHERE support_messages.support_ticket_id IN ({placeholders})
+        ORDER BY support_messages.created_at ASC, support_messages.id ASC
+        """,
+        ticket_ids,
+    ).fetchall()
+    grouped = {ticket_id: [] for ticket_id in ticket_ids}
+    for row in rows:
+        grouped.setdefault(row["support_ticket_id"], []).append(row)
+    return grouped
+
+
+def activity_log_rows(connection, where_clause="", params=()):
+    return connection.execute(
+        f"""
+        SELECT activity_logs.*,
+               actors.name AS actor_name,
+               targets.name AS target_user_name
+        FROM activity_logs
+        LEFT JOIN users AS actors ON actors.id = activity_logs.actor_id
+        LEFT JOIN users AS targets ON targets.id = activity_logs.target_user_id
+        {where_clause}
+        ORDER BY activity_logs.created_at DESC, activity_logs.id DESC
+        """,
+        params,
+    ).fetchall()
+
+
+def guest_help_rows(connection):
+    return connection.execute(
+        "SELECT * FROM guest_help_requests ORDER BY updated_at DESC, id DESC"
+    ).fetchall()
+
+
+def log_activity(connection, actor, action, details="", target_user_id=None):
+    connection.execute(
+        """
+        INSERT INTO activity_logs (actor_id, actor_role, target_user_id, action, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            actor["id"] if actor else None,
+            actor["role"] if actor else "",
+            target_user_id,
+            action,
+            details,
+            now_iso(),
+        ),
+    )
 
 
 def coupon_rows(connection, where_clause="", params=()):
@@ -1286,7 +1503,7 @@ def restricted_account_page(user):
 
 
 def account_restricted(user):
-    return bool(user) and user["role"] != "admin" and user["account_state"] in {"LOCKED", "SUSPENDED", "BANNED", "PENDING_VERIFICATION"}
+    return bool(user) and user["role"] not in {"admin", "helpdesk"} and user["account_state"] in {"LOCKED", "SUSPENDED", "BANNED", "PENDING_VERIFICATION"}
 
 
 def render_credit_issue_panel(connection):
@@ -2193,6 +2410,7 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
 
 
 def render_admin_home(connection, user, message=None, level="info"):
+    title = "Engineer Dashboard" if user["role"] == "helpdesk" else "Admin Dashboard"
     body = f"""
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]}</strong></div>
@@ -2202,14 +2420,14 @@ def render_admin_home(connection, user, message=None, level="info"):
     </section>
     <section class="admin-grid">
       <section class="panel">
-        <span class="eyebrow">Admin Dashboard</span>
+        <span class="eyebrow">{html.escape(title)}</span>
         <h2>Budhub operations overview</h2>
         <div class="hero-actions"><a class="button" href="/admin">Open Admin Tools</a><a class="button ghost" href="/">View Customer Menu</a></div>
       </section>
       <section class="panel"><span class="eyebrow">Flow</span><h2>Bank verifies first, dispatch assigns drivers</h2><p>The workflow now follows the same order every time.</p></section>
     </section>
     """
-    return page("Admin Dashboard", body, user=user, message=message, level=level)
+    return page(title, body, user=user, message=message, level=level)
 
 
 def render_admin_dashboard(connection, user, message=None, level="info"):
@@ -2217,7 +2435,11 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     products = connection.execute("SELECT * FROM products ORDER BY created_at DESC").fetchall()
     tickets = ticket_rows(connection)
     support = support_rows(connection)
+    support_messages = support_messages_map(connection, [ticket["id"] for ticket in support])
+    activity_logs = activity_log_rows(connection, "LIMIT 40")
     coupons = coupon_rows(connection)
+    leafly_strains = leafly_strain_rows(connection)
+    guest_help = guest_help_rows(connection)
     verification_queue = connection.execute(
         """
         SELECT * FROM users
@@ -2231,6 +2453,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Menu Items</span><strong>{len(products)}</strong></div>
       <div class="stat-card"><span>Budhub Tickets</span><strong>{len(tickets)}</strong></div>
       <div class="stat-card"><span>Support Inbox</span><strong>{sum(1 for ticket in support if ticket['status'] != 'CLOSED')}</strong></div>
+      <div class="stat-card"><span>Registration Help</span><strong>{sum(1 for request in guest_help if request['status'] != 'CLOSED')}</strong></div>
       <div class="stat-card"><span>ID Reviews</span><strong>{len(verification_queue)}</strong></div>
       <div class="stat-card"><span>Emergency Alerts</span><strong>{sum(1 for ticket in support if str(ticket['category']).startswith('EMERGENCY_') and ticket['status'] != 'CLOSED')}</strong></div>
     </section>
@@ -2241,7 +2464,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
           <label>Name<input type="text" name="name" required></label>
           <label>Email<input type="email" name="email" required></label>
           <label>Password<input type="password" name="password" minlength="6" required></label>
-          <label>Role<select name="role"><option value="client">Customer</option><option value="banker">In-House Bank</option><option value="dispatcher">Dispatch Lead</option><option value="picker">Inventory Picker</option><option value="driver">Driver</option><option value="admin">Admin</option></select></label>
+          <label>Role<select name="role"><option value="client">Customer</option><option value="banker">In-House Bank</option><option value="dispatcher">Dispatch Lead</option><option value="picker">Inventory Picker</option><option value="driver">Driver</option><option value="admin">Admin</option><option value="helpdesk">Budhub Helpdesk</option></select></label>
           <button type="submit">Create Account</button>
         </form>
       </section>
@@ -2264,6 +2487,12 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
               <option value="Sativa">Sativa</option>
               <option value="Indica">Indica</option>
               <option value="Hybrid">Hybrid</option>
+            </select>
+          </label>
+          <label>Leafly Strain
+            <select name="leafly_strain_id">
+              <option value="">Choose Leafly strain reference</option>
+              {''.join(f"<option value='{strain['id']}'>{html.escape(strain['name'])} ({html.escape(strain['strain_type'])})</option>" for strain in leafly_strains)}
             </select>
           </label>
           <label>Price<input type="number" name="price" min="0.01" step="0.01" required></label>
@@ -2368,13 +2597,24 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
                 <div class="order-meta">
                   <span>User: {html.escape(ticket["user_email"])}</span>
                   <span>Opened By: {html.escape(ticket["opened_by_name"])}</span>
+                  <span>Assigned To: {html.escape(ticket["assigned_to_name"] or "Unassigned")}</span>
                   <span>Priority: {html.escape(ticket["priority"])}</span>
                   <span>Ticket: {html.escape(ticket["related_ticket_number"] or "N/A")}</span>
                 </div>
                 <div class="reason-box {'emergency-medical' if ticket['category']=='EMERGENCY_MEDICAL_EMERGENCY' else 'emergency-accident' if ticket['category']=='EMERGENCY_CAR_ACCIDENT' else 'emergency-robbery' if ticket['category']=='EMERGENCY_ROBBERY' else 'emergency-traffic' if ticket['category']=='EMERGENCY_TRAFFIC_STOP' else ''}">{html.escape(ticket["reason"])}</div>
+                <div class="item-pill-list">
+                  {''.join(f"<div class='item-pill'><strong>{html.escape(message['author_name'])}</strong><span>{html.escape(message['message'])}</span></div>" for message in support_messages.get(ticket['id'], [])) or '<p>No replies yet.</p>'}
+                </div>
                 <form method="post" action="/support/update" class="action-stack">
                   <input type="hidden" name="ticket_id" value="{ticket["id"]}">
+                  <label>Assign To
+                    <select name="assigned_to">
+                      <option value="">Unassigned</option>
+                      {''.join(f"<option value='{account['id']}' {'selected' if ticket['assigned_to'] == account['id'] else ''}>{html.escape(account['name'])}</option>" for account in users if account['role'] in {'admin', 'helpdesk'})}
+                    </select>
+                  </label>
                   <label>Review Status<select name="status"><option value="OPEN">Open</option><option value="REVIEWED">Reviewed</option><option value="CLOSED">Closed</option></select></label>
+                  <label>Reply<textarea name="reply_message" placeholder="Reply to the user from admin/helpdesk"></textarea></label>
                   <label>Resolution Note<textarea name="resolution_note" placeholder="Optional review note"></textarea></label>
                   <button type="submit">Update Support Ticket</button>
                 </form>
@@ -2385,13 +2625,87 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
         </div>
       </section>
     </section>
+    <section class="panel">
+      <h2>Registration Help Requests</h2>
+      <div class="order-card-grid">
+        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(request['email'])}</span><h3>{html.escape(request['name'])}</h3></div><span class='menu-count'>{html.escape(request['status'])}</span></div><div class='reason-box'>{html.escape(request['issue'])}</div><form method='post' action='/guest-help/update' class='action-stack'><input type='hidden' name='request_id' value='{request['id']}'><label>Status<select name='status'><option value='OPEN'>Open</option><option value='REVIEWED'>Reviewed</option><option value='CLOSED'>Closed</option></select></label><label>Response Note<textarea name='response_note' placeholder='Internal follow-up or response summary'></textarea></label><button type='submit'>Update Request</button></form></article>" for request in guest_help) or '<p>No registration help requests yet.</p>'}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Account Activity Log</h2>
+      <div class="order-card-grid">
+        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(log['actor_role'] or 'System')}</span><h3>{html.escape(log['actor_name'] or 'System')}</h3></div><span class='menu-count'>{html.escape(log['created_at'])}</span></div><div class='order-meta'><span>Action: {html.escape(log['action'])}</span><span>Target: {html.escape(log['target_user_name'] or 'N/A')}</span></div><div class='reason-box'>{html.escape(log['details'] or 'No extra details provided.')}</div></article>" for log in activity_logs) or '<p>No activity logged yet.</p>'}
+      </div>
+    </section>
     """
     return page("Admin Tools", body, user=user, message=message, level=level)
+
+
+def render_helpdesk_dashboard(connection, user, message=None, level="info"):
+    tickets = support_rows(connection, "WHERE support_tickets.user_id = ? OR support_tickets.opened_by = ?", (user["id"], user["id"]))
+    message_map = support_messages_map(connection, [ticket["id"] for ticket in tickets])
+    cards = []
+    for ticket in tickets:
+        replies = "".join(
+            f"<div class='item-pill'><strong>{html.escape(entry['author_name'])}</strong><span>{html.escape(entry['message'])}</span></div>"
+            for entry in message_map.get(ticket["id"], [])
+        ) or "<p>No replies yet.</p>"
+        reply_form = ""
+        if ticket["status"] != "CLOSED":
+            reply_form = f"""
+            <form method="post" action="/support/reply" class="action-stack">
+              <input type="hidden" name="ticket_id" value="{ticket["id"]}">
+              <label>Reply<textarea name="message" required placeholder="Add more details or reply to support"></textarea></label>
+              <button type="submit">Send Reply</button>
+            </form>
+            """
+        cards.append(
+            f"""
+            <article class="order-card">
+              <div class="order-card-head">
+                <div><span class="eyebrow">{html.escape(ticket["category"])}</span><h3>{html.escape(ticket["subject"] or "Support Ticket")}</h3></div>
+                <span class="menu-count">{html.escape(ticket["status"])}</span>
+              </div>
+              <div class="reason-box">{html.escape(ticket["reason"])}</div>
+              <div class="item-pill-list">{replies}</div>
+              {reply_form}
+            </article>
+            """
+        )
+    body = f"""
+    <section class="stats-row">
+      <div class="stat-card"><span>Open Help Tickets</span><strong>{sum(1 for ticket in tickets if ticket['status'] != 'CLOSED')}</strong></div>
+      <div class="stat-card"><span>Total Messages</span><strong>{sum(len(message_map.get(ticket['id'], [])) for ticket in tickets)}</strong></div>
+    </section>
+    <section class="admin-grid">
+      <section class="panel">
+        <h2>Open Help Ticket</h2>
+        <form method="post" action="/support/create" class="form-grid">
+          <label>Subject<input type="text" name="subject" required placeholder="Login issue, order issue, account verification..."></label>
+          <label>Category<select name="category"><option value="GENERAL_HELP">General Help</option><option value="ACCOUNT_HELP">Account Help</option><option value="ORDER_HELP">Order Help</option><option value="TECHNICAL_HELP">Technical Help</option></select></label>
+          <label>Priority<select name="priority"><option value="NORMAL">Normal</option><option value="HIGH">High</option></select></label>
+          <label>Issue<textarea name="reason" required placeholder="Explain what is happening and what you need help with."></textarea></label>
+          <button type="submit">Send to Budhub Helpdesk</button>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>How Helpdesk Works</h2>
+        <p>Use this dashboard to report account, order, or technical issues. Admin and Budhub Helpdesk can review the thread, reply, and close the issue when it is resolved.</p>
+      </section>
+    </section>
+    <section class="panel">
+      <h2>Your Help Conversations</h2>
+      <div class="order-card-grid">{''.join(cards) if cards else '<p>No help tickets yet.</p>'}</div>
+    </section>
+    """
+    return page("Budhub Help", body, user=user, message=message, level=level)
 
 
 def render_dashboard(connection, user, message=None, level="info"):
     if user["role"] == "client":
         return render_client_dashboard(connection, user, message, level)
+    if user["role"] == "helpdesk":
+        return render_helpdesk_dashboard(connection, user, message, level)
     if user["role"] == "banker":
         return render_banker_dashboard(connection, user, message, level)
     if user["role"] == "dispatcher":
@@ -2414,6 +2728,8 @@ def require_user(start_response, user):
 def require_role(start_response, user, roles):
     if not user:
         return redirect(start_response, "/login")
+    if user["role"] == "helpdesk":
+        return None
     if user["role"] not in roles:
         return text_response(start_response, page("Access Denied", "<section class='panel'><p>You do not have access to that page.</p></section>", user=user), status="403 Forbidden")
     return None
@@ -2455,7 +2771,9 @@ def handle_login(environ, start_response, connection):
     user = connection.execute("SELECT * FROM users WHERE email = ?", (data.get("email", "").lower(),)).fetchone()
     if not user or user["password_hash"] != hash_password(data.get("password", "")):
         return text_response(start_response, page("Login", login_form("Incorrect email or password.")))
+    log_activity(connection, user, "LOGIN", "Signed into Budhub.")
     token = create_session(connection, user["id"])
+    connection.commit()
     return redirect(start_response, "/dashboard", f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax")
 
 
@@ -2500,6 +2818,8 @@ def handle_register(environ, start_response, connection):
         """,
         (id_front_path, id_back_path, id_selfie_path, user_id),
     )
+    created_user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    log_activity(connection, created_user, "REGISTER", "Created a customer account and uploaded verification documents.", target_user_id=user_id)
     connection.commit()
     return redirect(start_response, "/login?message=Account created and waiting for ID verification")
 
@@ -2511,13 +2831,22 @@ def handle_create_product(environ, start_response, connection, user):
     data = read_post_data(environ)
     category = data.get("category", "General") or "General"
     menu_group, default_strain_type = infer_product_metadata(data.get("name", ""), category, data.get("description", ""))
+    selected_leafly = None
+    leafly_id = int(data.get("leafly_strain_id", "0") or "0")
+    if leafly_id:
+        selected_leafly = connection.execute("SELECT * FROM leafly_strains WHERE id = ?", (leafly_id,)).fetchone()
     strain_type = normalize_strain_type(data.get("strain_type") or default_strain_type or "Unspecified")
+    if selected_leafly and category in {"Flower", "Concentrates"}:
+        strain_type = normalize_strain_type(selected_leafly["strain_type"] or strain_type)
     connection.execute(
-        "INSERT INTO products (name, category, description, price, stock, menu_group, strain_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO products (name, category, description, image_url, source_url, leafly_strain_name, price, stock, menu_group, strain_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             data.get("name", ""),
             category,
             data.get("description", ""),
+            selected_leafly["image_url"] if selected_leafly else None,
+            selected_leafly["source_url"] if selected_leafly else None,
+            selected_leafly["name"] if selected_leafly else None,
             float(data.get("price", "0")),
             int(data.get("stock", "0")),
             data.get("menu_group", "").strip() or menu_group,
@@ -2525,6 +2854,7 @@ def handle_create_product(environ, start_response, connection, user):
             now_iso(),
         ),
     )
+    log_activity(connection, user, "CREATE_PRODUCT", f"Created catalog item {data.get('name', '')}.")
     connection.commit()
     return redirect(start_response, "/admin?message=Menu item created")
 
@@ -2593,8 +2923,78 @@ def handle_create_user(environ, start_response, connection, user):
         """,
         (data.get("name", ""), email, hash_password(data.get("password", "")), data.get("role", "client"), now_iso(), now_iso()),
     )
+    created = connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    log_activity(connection, user, "CREATE_USER", f"Created {data.get('role', 'client')} account for {email}.", target_user_id=created["id"] if created else None)
     connection.commit()
     return redirect(start_response, "/admin?message=Account created")
+
+
+def handle_create_support_ticket(environ, start_response, connection, user):
+    gate = require_user(start_response, user)
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    reason = data.get("reason", "").strip()
+    subject = data.get("subject", "").strip()
+    if not subject or not reason:
+        return redirect(start_response, "/help?message=Subject and issue details are required")
+    cursor = connection.execute(
+        """
+        INSERT INTO support_tickets (user_id, opened_by, category, subject, priority, related_ticket_id, reason, status, resolution_note, assigned_to, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, 'OPEN', '', NULL, ?, ?)
+        """,
+        (user["id"], user["id"], data.get("category", "GENERAL_HELP"), subject, data.get("priority", "NORMAL"), reason, now_iso(), now_iso()),
+    )
+    ticket_id = cursor.lastrowid
+    connection.execute(
+        "INSERT INTO support_messages (support_ticket_id, author_id, message, created_at) VALUES (?, ?, ?, ?)",
+        (ticket_id, user["id"], reason, now_iso()),
+    )
+    log_activity(connection, user, "OPEN_SUPPORT_TICKET", f"Opened support ticket: {subject}.", target_user_id=user["id"])
+    connection.commit()
+    return redirect(start_response, "/help?message=Help ticket created")
+
+
+def handle_guest_help_request(environ, start_response, connection):
+    data = read_post_data(environ)
+    if not data.get("name", "").strip() or not data.get("email", "").strip() or not data.get("issue", "").strip():
+        return redirect(start_response, "/register?message=Name, email, and issue are required")
+    connection.execute(
+        """
+        INSERT INTO guest_help_requests (name, email, issue, status, response_note, created_at, updated_at)
+        VALUES (?, ?, ?, 'OPEN', '', ?, ?)
+        """,
+        (data.get("name", "").strip(), data.get("email", "").strip().lower(), data.get("issue", "").strip(), now_iso(), now_iso()),
+    )
+    connection.commit()
+    return redirect(start_response, "/register?message=Registration help request sent")
+
+
+def handle_support_reply(environ, start_response, connection, user):
+    gate = require_user(start_response, user)
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    ticket_id = int(data.get("ticket_id", "0"))
+    ticket = connection.execute("SELECT * FROM support_tickets WHERE id = ?", (ticket_id,)).fetchone()
+    if not ticket:
+        return redirect(start_response, "/help?message=Support ticket not found")
+    if user["role"] not in {"admin", "helpdesk"} and ticket["user_id"] != user["id"]:
+        return redirect(start_response, "/help?message=That support ticket is not yours")
+    message = data.get("message", "").strip()
+    if not message:
+        return redirect(start_response, "/help?message=Reply message is required")
+    connection.execute(
+        "INSERT INTO support_messages (support_ticket_id, author_id, message, created_at) VALUES (?, ?, ?, ?)",
+        (ticket_id, user["id"], message, now_iso()),
+    )
+    connection.execute(
+        "UPDATE support_tickets SET status = CASE WHEN status = 'CLOSED' THEN 'REVIEWED' ELSE status END, updated_at = ? WHERE id = ?",
+        (now_iso(), ticket_id),
+    )
+    log_activity(connection, user, "REPLY_SUPPORT_TICKET", f"Replied to support ticket #{ticket_id}.", target_user_id=ticket["user_id"])
+    connection.commit()
+    return redirect(start_response, "/help?message=Reply sent")
 
 
 def handle_add_to_cart(environ, start_response, connection, user):
@@ -2615,6 +3015,7 @@ def handle_add_to_cart(environ, start_response, connection, user):
         connection.execute("UPDATE cart_items SET quantity = ? WHERE id = ?", (min(existing["quantity"] + quantity, product["stock"]), existing["id"]))
     else:
         connection.execute("INSERT INTO cart_items (user_id, product_id, quantity, created_at) VALUES (?, ?, ?, ?)", (user["id"], product_id, quantity, now_iso()))
+    log_activity(connection, user, "ADD_TO_BAG", f"Added {quantity} of {product['name']} to the bag.", target_user_id=user["id"])
     connection.commit()
     return redirect_with_message(start_response, return_to, "Added to bag")
 
@@ -2626,7 +3027,10 @@ def handle_remove_from_cart(environ, start_response, connection, user):
     data = read_post_data(environ)
     product_id = int(data.get("product_id", "0"))
     return_to = data.get("return_to", "/#bag-widget") or "/#bag-widget"
+    product = connection.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     connection.execute("DELETE FROM cart_items WHERE user_id = ? AND product_id = ?", (user["id"], product_id))
+    if product:
+        log_activity(connection, user, "REMOVE_FROM_BAG", f"Removed {product['name']} from the bag.", target_user_id=user["id"])
     connection.commit()
     return redirect_with_message(start_response, return_to, "Item removed")
 
@@ -2643,7 +3047,7 @@ def handle_create_order(environ, start_response, connection, user):
     if fulfillment_type == "PICKUP" and not shipping_address:
         shipping_address = "In-store pickup"
     try:
-        create_ticket(
+        ticket_id = create_ticket(
             connection,
             user["id"],
             [{"product_id": int(data.get("product_id", "0")), "quantity": int(data.get("quantity", "1"))}],
@@ -2655,6 +3059,7 @@ def handle_create_order(environ, start_response, connection, user):
         )
     except ValueError as exc:
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, str(exc)))
+    log_activity(connection, user, "CREATE_ORDER", f"Created order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
     return redirect(start_response, "/dashboard?message=Order placed")
 
@@ -2675,7 +3080,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
     if fulfillment_type == "PICKUP" and not shipping_address:
         shipping_address = "In-store pickup"
     try:
-        create_ticket(
+        ticket_id = create_ticket(
             connection,
             user["id"],
             [{"product_id": item["product_id"], "quantity": item["quantity"]} for item in items],
@@ -2688,6 +3093,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
     except ValueError as exc:
         return redirect_with_message(start_response, return_to, str(exc))
     connection.execute("DELETE FROM cart_items WHERE user_id = ?", (user["id"],))
+    log_activity(connection, user, "CHECKOUT_BAG", f"Created grouped order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
     return redirect(start_response, "/dashboard?message=Grouped Budhub ticket created")
 
@@ -2910,6 +3316,7 @@ def handle_update_user_account(environ, start_response, connection, user):
             """,
             (target_id, user["id"], account_state, reason, now_iso(), now_iso()),
         )
+    log_activity(connection, user, "UPDATE_ACCOUNT_STATE", f"Set account state to {account_state} for {target['email']}. Reason: {reason}", target_user_id=target_id)
     connection.commit()
     message = "Account updated and support ticket created" if account_state in {"LOCKED", "SUSPENDED", "BANNED"} else "Account returned to active status"
     return redirect(start_response, f"/admin?message={message}")
@@ -2923,12 +3330,41 @@ def handle_update_support_ticket(environ, start_response, connection, user):
     ticket_id = int(data.get("ticket_id", "0"))
     status = data.get("status", "OPEN")
     resolution_note = data.get("resolution_note", "").strip()
+    reply_message = data.get("reply_message", "").strip()
+    assigned_to = data.get("assigned_to", "").strip()
+    ticket = connection.execute("SELECT * FROM support_tickets WHERE id = ?", (ticket_id,)).fetchone()
+    if not ticket:
+        return redirect(start_response, "/admin?message=Support ticket not found")
     connection.execute(
-        "UPDATE support_tickets SET status = ?, resolution_note = ?, updated_at = ? WHERE id = ?",
-        (status, resolution_note, now_iso(), ticket_id),
+        "UPDATE support_tickets SET status = ?, resolution_note = ?, assigned_to = ?, updated_at = ? WHERE id = ?",
+        (status, resolution_note, int(assigned_to) if assigned_to else None, now_iso(), ticket_id),
     )
+    if reply_message:
+        connection.execute(
+            "INSERT INTO support_messages (support_ticket_id, author_id, message, created_at) VALUES (?, ?, ?, ?)",
+            (ticket_id, user["id"], reply_message, now_iso()),
+        )
+    log_activity(connection, user, "UPDATE_SUPPORT_TICKET", f"Updated support ticket #{ticket_id} to {status}.", target_user_id=ticket["user_id"])
     connection.commit()
     return redirect(start_response, "/admin?message=Support ticket updated")
+
+
+def handle_update_guest_help(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    request_id = int(data.get("request_id", "0"))
+    request_row = connection.execute("SELECT * FROM guest_help_requests WHERE id = ?", (request_id,)).fetchone()
+    if not request_row:
+        return redirect(start_response, "/admin?message=Registration help request not found")
+    connection.execute(
+        "UPDATE guest_help_requests SET status = ?, response_note = ?, updated_at = ? WHERE id = ?",
+        (data.get("status", "OPEN"), data.get("response_note", "").strip(), now_iso(), request_id),
+    )
+    log_activity(connection, user, "UPDATE_GUEST_HELP", f"Updated registration help request #{request_id}.")
+    connection.commit()
+    return redirect(start_response, "/admin?message=Registration help request updated")
 
 
 def handle_user_verification(environ, start_response, connection, user):
@@ -2957,6 +3393,7 @@ def handle_user_verification(environ, start_response, connection, user):
             """,
             (note or "Verified by admin.", now_iso(), user_id),
         )
+        log_activity(connection, user, "VERIFY_USER", f"Approved verification for {target['email']}.", target_user_id=user_id)
         connection.commit()
         return redirect(start_response, "/admin?message=Customer verification approved")
     if decision == "reject":
@@ -2974,6 +3411,7 @@ def handle_user_verification(environ, start_response, connection, user):
             """,
             (note, note, user_id),
         )
+        log_activity(connection, user, "REJECT_USER_VERIFICATION", f"Rejected verification for {target['email']}.", target_user_id=user_id)
         connection.commit()
         return redirect(start_response, "/admin?message=Customer verification rejected")
     return redirect(start_response, "/admin?message=Unknown verification action")
@@ -3000,7 +3438,7 @@ def application(environ, start_response):
         user = get_current_user(environ, connection)
         params = query_params(environ)
         message = params.get("message")
-        if user and account_restricted(user) and path not in {"/dashboard", "/logout"}:
+        if user and account_restricted(user) and path not in {"/dashboard", "/logout", "/help"}:
             return redirect(start_response, "/dashboard?message=Your account is restricted")
         if path == "/" and method == "GET":
             return text_response(start_response, render_store_page(connection, user=user, message=message, filters=params))
@@ -3008,6 +3446,8 @@ def application(environ, start_response):
             return handle_login(environ, start_response, connection) if method == "POST" else text_response(start_response, page("Login", login_form(), user=user))
         if path == "/register":
             return handle_register(environ, start_response, connection) if method == "POST" else text_response(start_response, page("Register", register_form(), user=user))
+        if path == "/guest-help" and method == "POST":
+            return handle_guest_help_request(environ, start_response, connection)
         if path == "/logout":
             destroy_session(environ, connection)
             return redirect(start_response, "/", f"{SESSION_COOKIE}=deleted; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
@@ -3018,6 +3458,9 @@ def application(environ, start_response):
             if account_restricted(user):
                 return text_response(start_response, restricted_account_page(user),)
             return text_response(start_response, render_dashboard(connection, user, message=message))
+        if path == "/help":
+            gate = require_user(start_response, user)
+            return gate or text_response(start_response, render_helpdesk_dashboard(connection, user, message=message))
         if path == "/cart":
             gate = require_role(start_response, user, {"client"})
             return gate or text_response(start_response, render_cart_page(connection, user, message=message))
@@ -3054,8 +3497,14 @@ def application(environ, start_response):
             return handle_update_user_account(environ, start_response, connection, user)
         if path == "/users/verify" and method == "POST":
             return handle_user_verification(environ, start_response, connection, user)
+        if path == "/support/create" and method == "POST":
+            return handle_create_support_ticket(environ, start_response, connection, user)
+        if path == "/support/reply" and method == "POST":
+            return handle_support_reply(environ, start_response, connection, user)
         if path == "/support/update" and method == "POST":
             return handle_update_support_ticket(environ, start_response, connection, user)
+        if path == "/guest-help/update" and method == "POST":
+            return handle_update_guest_help(environ, start_response, connection, user)
     return text_response(start_response, page("Not Found", "<section class='panel'><p>That page does not exist.</p></section>"), status="404 Not Found")
 
 
