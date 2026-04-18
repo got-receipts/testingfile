@@ -1350,18 +1350,26 @@ def single_ticket(connection, ticket_id):
 
 
 def support_rows(connection, where_clause="", params=()):
+    has_subject = column_exists(connection, "support_tickets", "subject")
+    has_assigned_to = column_exists(connection, "support_tickets", "assigned_to")
+    subject_select = "support_tickets.subject AS subject," if has_subject else "'' AS subject,"
+    assigned_to_select = "support_tickets.assigned_to AS assigned_to," if has_assigned_to else "NULL AS assigned_to,"
+    assigned_join = "LEFT JOIN users AS assignees ON assignees.id = support_tickets.assigned_to" if has_assigned_to else ""
+    assigned_name_select = "assignees.name AS assigned_to_name," if has_assigned_to else "NULL AS assigned_to_name,"
     return connection.execute(
         f"""
         SELECT support_tickets.*,
+               {subject_select}
+               {assigned_to_select}
                users.name AS user_name,
                users.email AS user_email,
                openers.name AS opened_by_name,
-               assignees.name AS assigned_to_name,
+               {assigned_name_select}
                tickets.ticket_number AS related_ticket_number
         FROM support_tickets
         JOIN users ON users.id = support_tickets.user_id
         JOIN users AS openers ON openers.id = support_tickets.opened_by
-        LEFT JOIN users AS assignees ON assignees.id = support_tickets.assigned_to
+        {assigned_join}
         LEFT JOIN tickets ON tickets.id = support_tickets.related_ticket_id
         {where_clause}
         ORDER BY support_tickets.updated_at DESC, support_tickets.id DESC
@@ -1407,6 +1415,8 @@ def activity_log_rows(connection, where_clause="", params=()):
 
 
 def guest_help_rows(connection):
+    if not table_exists(connection, "guest_help_requests"):
+        return []
     return connection.execute(
         "SELECT * FROM guest_help_requests ORDER BY updated_at DESC, id DESC"
     ).fetchall()
