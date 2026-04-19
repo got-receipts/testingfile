@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import sqlite3
+import traceback
 from datetime import datetime, timedelta
 from http import cookies
 from urllib.error import HTTPError, URLError
@@ -700,8 +701,10 @@ class MirroringSQLiteConnection(sqlite3.Connection):
 class PostgreSQLCursorWrapper:
     def __init__(self, connection):
         self.connection = connection
-        cursor_factory = psycopg2_extras.RealDictCursor if psycopg2_extras is not None else None
-        self._cursor = connection._connection.cursor(cursor_factory=cursor_factory)
+        if psycopg2_extras is not None:
+            self._cursor = connection._connection.cursor(cursor_factory=psycopg2_extras.RealDictCursor)
+        else:
+            self._cursor = connection._connection.cursor()
         self.lastrowid = None
 
     def _normalize_query(self, query):
@@ -809,7 +812,11 @@ def sqlite_connection():
 
 def db_connection():
     if postgres_enabled():
-        return PostgreSQLConnectionWrapper(postgres_database_url())
+        try:
+            return PostgreSQLConnectionWrapper(postgres_database_url())
+        except Exception as exc:
+            print(f"PostgreSQL connection failed, falling back to SQLite: {exc}")
+            traceback.print_exc()
     return sqlite_connection()
 
 
