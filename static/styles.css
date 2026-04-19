@@ -155,6 +155,19 @@ nav {
   padding: 2rem 4rem 4rem;
 }
 
+.site-footer {
+  display: grid;
+  justify-items: center;
+  gap: 0.15rem;
+  padding: 0 1.25rem 1.2rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(247, 248, 243, 0.18);
+  pointer-events: none;
+  user-select: none;
+}
+
 .hero,
 .panel,
 .stat-card,

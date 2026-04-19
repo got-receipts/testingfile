@@ -1673,6 +1673,10 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
     {flash_message(message, level)}
     {body}
   </main>
+  <footer class="site-footer">
+    <span>Copyright BudHub 2026</span>
+    <span>Dashboard Kernal V 0.3</span>
+  </footer>
   {extra_shell}
   {render_help_button(user)}
 </body>
