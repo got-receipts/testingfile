@@ -168,6 +168,15 @@ POSTGRES_CREATE_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS order_messages (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS activity_logs (
         id SERIAL PRIMARY KEY,
         actor_id INTEGER,
@@ -245,6 +254,7 @@ POSTGRES_SYNC_TABLES = [
     "ticket_items",
     "support_tickets",
     "support_messages",
+    "order_messages",
     "activity_logs",
     "guest_help_requests",
     "coupons",
@@ -263,6 +273,7 @@ POSTGRES_SERIAL_TABLES = {
     "ticket_items",
     "support_tickets",
     "support_messages",
+    "order_messages",
     "activity_logs",
     "guest_help_requests",
     "coupons",
@@ -909,6 +920,7 @@ def render_cart_widget(connection, user, filters):
         <span class="menu-count">{client_cart_count(connection, user["id"])} items</span>
       </div>
       <div class="bag-list">{''.join(rows) if rows else '<p>Your bag is empty. Add something and keep browsing.</p>'}</div>
+      <div class="bag-checkout-shell">
       <div class="checkout-total"><span>Subtotal</span><strong>{format_money(subtotal)}</strong></div>
       <div class="checkout-total"><span>Available Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
       <form method="post" action="/cart/checkout" class="form-grid bag-checkout">
@@ -919,12 +931,13 @@ def render_cart_widget(connection, user, filters):
             <option value="PICKUP">Pick Up In Person</option>
           </select>
         </label>
-        <label>Delivery Address or Pickup Note<textarea name="shipping_address" placeholder="Required for delivery, optional for pickup"></textarea></label>
+        {render_address_input("shipping_address", "bag-shipping-address", "Required for delivery, optional for pickup")}
         <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
         <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
         <label>Driver Note<textarea name="customer_note" placeholder="Gate code, apartment, or delivery note"></textarea></label>
-        <button type="submit" {'disabled' if not items else ''}>Place One Grouped Order</button>
+        <button type="submit" {'disabled' if not items else ''}>Place Order</button>
       </form>
+      </div>
     </aside>
     """
 
@@ -1373,6 +1386,16 @@ def init_db():
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (support_ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE,
+                FOREIGN KEY (author_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS order_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
                 FOREIGN KEY (author_id) REFERENCES users(id)
             );
 
@@ -1870,6 +1893,42 @@ def support_messages_map(connection, ticket_ids):
     for row in rows:
         grouped.setdefault(row["support_ticket_id"], []).append(row)
     return grouped
+
+
+def order_messages_map(connection, ticket_ids):
+    if not table_exists(connection, "order_messages") or not ticket_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ticket_ids)
+    rows = connection.execute(
+        f"""
+        SELECT order_messages.*, users.name AS author_name, users.role AS author_role
+        FROM order_messages
+        JOIN users ON users.id = order_messages.author_id
+        WHERE order_messages.ticket_id IN ({placeholders})
+        ORDER BY order_messages.created_at ASC, order_messages.id ASC
+        """,
+        ticket_ids,
+    ).fetchall()
+    grouped = {ticket_id: [] for ticket_id in ticket_ids}
+    for row in rows:
+        grouped.setdefault(row["ticket_id"], []).append(row)
+    return grouped
+
+
+def recent_order_messages(connection, limit=20):
+    if not table_exists(connection, "order_messages"):
+        return []
+    return connection.execute(
+        """
+        SELECT order_messages.*, users.name AS author_name, users.role AS author_role, tickets.ticket_number AS ticket_number
+        FROM order_messages
+        JOIN users ON users.id = order_messages.author_id
+        JOIN tickets ON tickets.id = order_messages.ticket_id
+        ORDER BY order_messages.created_at DESC, order_messages.id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
 
 
 def activity_log_rows(connection, where_clause="", params=(), trailing_clause=""):
@@ -2843,6 +2902,78 @@ def render_tracker(status):
     return f"{rabbit}<div class='tracker'>{''.join(blocks)}</div>{extra}"
 
 
+def google_maps_link(address):
+    address = (address or "").strip()
+    if not address or address == "In-store pickup":
+        return ""
+    return f"https://www.google.com/maps/search/?api=1&{urlencode({'query': address})}"
+
+
+def google_maps_embed_link(address):
+    address = (address or "").strip()
+    if not address or address == "In-store pickup":
+        return ""
+    return f"https://www.google.com/maps?{urlencode({'q': address})}&output=embed"
+
+
+def render_address_input(field_name, field_id, placeholder, value=""):
+    maps_link = google_maps_link(value)
+    maps_embed = google_maps_embed_link(value)
+    return f"""
+    <div class="address-widget" data-address-widget="{html.escape(field_id)}">
+      <label>Delivery Address or Pickup Note<input type="text" id="{html.escape(field_id)}" name="{html.escape(field_name)}" value="{html.escape(value)}" placeholder="{html.escape(placeholder)}"></label>
+      <div class="address-widget-meta">
+        <a class="button ghost address-preview-link{' is-hidden' if not maps_link else ''}" href="{html.escape(maps_link or '#')}" target="_blank" rel="noopener noreferrer" data-address-link="{html.escape(field_id)}">Open in Google Maps</a>
+        <span class="subtle">Preview the route before placing the order.</span>
+      </div>
+      <div class="address-embed-shell{' is-hidden' if not maps_embed else ''}" data-address-embed-shell="{html.escape(field_id)}">
+        <iframe class="address-embed" src="{html.escape(maps_embed or '')}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" data-address-embed="{html.escape(field_id)}"></iframe>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var input = document.getElementById('{field_id}');
+        if (!input) {{
+          return;
+        }}
+        var link = document.querySelector('[data-address-link="{field_id}"]');
+        var shell = document.querySelector('[data-address-embed-shell="{field_id}"]');
+        var frame = document.querySelector('[data-address-embed="{field_id}"]');
+        function syncAddressPreview() {{
+          var value = input.value.trim();
+          if (!value || value.toLowerCase() === 'in-store pickup') {{
+            if (link) {{
+              link.classList.add('is-hidden');
+              link.setAttribute('href', '#');
+            }}
+            if (shell) {{
+              shell.classList.add('is-hidden');
+            }}
+            if (frame) {{
+              frame.setAttribute('src', '');
+            }}
+            return;
+          }}
+          var mapsLink = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(value);
+          var embedLink = 'https://www.google.com/maps?q=' + encodeURIComponent(value) + '&output=embed';
+          if (link) {{
+            link.classList.remove('is-hidden');
+            link.setAttribute('href', mapsLink);
+          }}
+          if (shell) {{
+            shell.classList.remove('is-hidden');
+          }}
+          if (frame) {{
+            frame.setAttribute('src', embedLink);
+          }}
+        }}
+        input.addEventListener('input', syncAddressPreview);
+        syncAddressPreview();
+      }})();
+    </script>
+    """
+
+
 def render_item_list(items):
     return "<div class='item-pill-list'>" + "".join(
         f"<div class='item-pill'><strong>{html.escape(item['product_name'])}</strong><span>{item['quantity']} x {format_money(item['locked_price'])}</span></div>"
@@ -2862,6 +2993,93 @@ def generate_block_name(connection):
     while connection.execute("SELECT id FROM delivery_blocks WHERE block_name = ?", (block_name,)).fetchone():
         block_name = f"BLOCK-{datetime.utcnow().strftime('%Y%m%d')}-{secrets.token_hex(2).upper()}"
     return block_name
+
+
+def user_can_access_ticket(user, ticket):
+    if not user or not ticket:
+        return False
+    if user["role"] in {"admin", "helpdesk", "dispatcher", "banker", "picker"}:
+        return True
+    if user["role"] == "client":
+        return ticket["client_id"] == user["id"]
+    if user["role"] == "driver":
+        return ticket["driver_id"] == user["id"]
+    return False
+
+
+def render_order_chat(ticket, user, message_rows):
+    if not user_can_access_ticket(user, ticket):
+        return ""
+    message_items = "".join(
+        f"<div class='chat-message'><strong>{html.escape(row['author_name'])}</strong><span class='eyebrow'>{html.escape(ROLE_LABELS.get(row['author_role'], row['author_role']))}</span><p>{html.escape(row['message'])}</p><small>{html.escape(row['created_at'])}</small></div>"
+        for row in message_rows
+    ) or "<p>No order chat yet.</p>"
+    return f"""
+    <section class="panel order-chat-panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Order Chat</span>
+          <h3>Ticket Messages</h3>
+        </div>
+        <span class="chat-pill">Chat</span>
+      </div>
+      <div class="chat-thread">{message_items}</div>
+      <form method="post" action="/orders/chat" class="action-stack">
+        <input type="hidden" name="order_id" value="{ticket['id']}">
+        <label>Message<textarea name="message" required placeholder="Send a note about this order"></textarea></label>
+        <button type="submit">Send Message</button>
+      </form>
+    </section>
+    """
+
+
+def render_ticket_modal(modal_id, title, summary_html, detail_html):
+    return f"""
+    <article class="order-card">
+      {summary_html}
+      <div class="ticket-actions">
+        <button type="button" class="button chat-launch" data-open-ticket-modal="{html.escape(modal_id)}">Open Order</button>
+      </div>
+    </article>
+    <div class="modal-shell is-hidden" id="{html.escape(modal_id)}">
+      <div class="modal-backdrop" data-close-ticket-modal="{html.escape(modal_id)}"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Order Details</span>
+            <h3>{html.escape(title)}</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-ticket-modal="{html.escape(modal_id)}">Close</button>
+        </div>
+        {detail_html}
+      </div>
+    </div>
+    """
+
+
+def render_ticket_modal_script():
+    return """
+    <script>
+      (function () {
+        document.querySelectorAll('[data-open-ticket-modal]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-open-ticket-modal'));
+            if (modal) {
+              modal.classList.remove('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-close-ticket-modal]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-close-ticket-modal'));
+            if (modal) {
+              modal.classList.add('is-hidden');
+            }
+          });
+        });
+      })();
+    </script>
+    """
 
 
 def create_delivery_block(connection, dispatcher_id):
@@ -3106,7 +3324,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
           <a class="button" href="{'/#bag-widget' if user and user['role'] == 'client' else '/login'}">{'Open Bag Widget' if user and user['role'] == 'client' else 'Customer Login'}</a>
           <a class="button ghost" href="{'/dashboard' if user else '/register'}">{'View Dashboard' if user else 'Create Account'}</a>
         </div>
-        <div class="notice-strip">Founded in Albany and built for locals, BudHub keeps the 518 menu, dispatch flow, customer support, and delivery visibility in one system.</div>
       </div>
       <div class="hero-side">
         <div class="hero-media-frame">
@@ -3257,15 +3474,15 @@ def order_form(connection, product_id, user, error=""):
             <label>Quantity<input type="number" name="quantity" min="1" max="{product["stock"]}" value="1" required></label>
             <label>How will you get it?
               <select name="fulfillment_type">
-                <option value="DELIVERY">Delivery</option>
-                <option value="PICKUP">Pick Up In Person</option>
-              </select>
+              <option value="DELIVERY">Delivery</option>
+              <option value="PICKUP">Pick Up In Person</option>
+            </select>
             </label>
-            <label>Delivery Address or Pickup Note<textarea name="shipping_address" placeholder="Required for delivery, optional for pickup"></textarea></label>
+            {render_address_input("shipping_address", "single-order-address", "Required for delivery, optional for pickup")}
             <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
             <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
             <label>Driver Note<textarea name="customer_note" placeholder="Gate code, apartment, or quick note"></textarea></label>
-            <button type="submit">Submit Order</button>
+            <button type="submit">Place Order</button>
           </form>
         </section>
         """,
@@ -3278,54 +3495,64 @@ def order_form(connection, product_id, user, error=""):
 def render_client_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection, "WHERE tickets.client_id = ?", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     cards = []
-    for ticket in tickets:
+    for index, ticket in enumerate(tickets):
         notes = ""
         if ticket["review_reason"]:
             notes += f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>"
         if ticket["cancel_reason"]:
             notes += f"<div class='tracker-note canceled-note'>Canceled: {html.escape(ticket['cancel_reason'])}</div>"
-        cards.append(
-            f"""
-            <article class="order-card">
-              <div class="order-card-head">
-                <div>
-                  <span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span>
-                  <h3>{html.escape(ticket["client_name"])}</h3>
-                </div>
-                {status_badge(ticket["status"])}
-              </div>
-              <div class="order-meta">
-                <span>Payment: {html.escape(ticket["payment_status"])}</span>
-                <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
-                <span>Total: {format_money(ticket["total_amount"])}</span>
-                <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
-                <span>Address / Pickup: {html.escape(ticket["shipping_address"])}</span>
-              </div>
-              <div class="order-meta">
-                <span>Coupon: {html.escape(ticket["coupon_code"] or "None")}</span>
-                <span>Discount: {format_money(ticket["discount_amount"])}</span>
-                <span>Credits Used: {format_money(ticket["credit_applied"])}</span>
-              </div>
-              {render_item_list(items_map.get(ticket["id"], []))}
-              {render_tracker(ticket["status"])}
-              {notes}
-              <div class="ticket-actions">
-                {
-                    f'''
-                    <form method="post" action="/orders/update" class="action-stack">
-                      <input type="hidden" name="order_id" value="{ticket["id"]}">
-                      <input type="hidden" name="action" value="client_cancel">
-                      <label>Cancel Reason<textarea name="reason" required placeholder="Tell us why you need to cancel"></textarea></label>
-                      <button type="submit" class="danger">Cancel Order</button>
-                    </form>
-                    '''
-                    if ticket["status"] not in {"DELIVERED", "CANCELED", "OUT_FOR_DELIVERY"} else "<span class='subtle'>This order can no longer be canceled online.</span>"
-                }
-              </div>
-            </article>
-            """
-        )
+        modal_id = f"client-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div>
+            <span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span>
+            <h3>{html.escape(ticket["client_name"])}</h3>
+          </div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+        </div>
+        """
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class="order-meta">
+          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Address / Pickup: {html.escape(ticket["shipping_address"])}</span>
+        </div>
+        <div class="order-meta">
+          <span>Coupon: {html.escape(ticket["coupon_code"] or "None")}</span>
+          <span>Discount: {format_money(ticket["discount_amount"])}</span>
+          <span>Credits Used: {format_money(ticket["credit_applied"])}</span>
+        </div>
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket["id"], []))}
+        {render_tracker(ticket["status"])}
+        {notes}
+        <div class="ticket-actions">
+          {
+              f'''
+              <form method="post" action="/orders/update" class="action-stack">
+                <input type="hidden" name="order_id" value="{ticket["id"]}">
+                <input type="hidden" name="action" value="client_cancel">
+                <label>Cancel Reason<textarea name="reason" required placeholder="Tell us why you need to cancel"></textarea></label>
+                <button type="submit" class="danger">Cancel Order</button>
+              </form>
+              '''
+              if ticket["status"] not in {"DELIVERED", "CANCELED", "OUT_FOR_DELIVERY"} else "<span class='subtle'>This order can no longer be canceled online.</span>"
+          }
+        </div>
+        {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
+        """
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
     latest = STATUS_LABELS.get(tickets[0]["status"], tickets[0]["status"]) if tickets else "No Orders"
     body = f"""
     <section class="stats-row">
@@ -3353,7 +3580,7 @@ def render_client_dashboard(connection, user, message=None, level="info"):
         level=level,
         cart_count=client_cart_count(connection, user["id"]),
         auto_refresh=True,
-        extra_shell=render_client_activity_widget(connection, user),
+        extra_shell=render_client_activity_widget(connection, user) + render_ticket_modal_script(),
     )
 
 
@@ -3397,7 +3624,6 @@ def render_cart_page(connection, user, message=None, level="info"):
         <div class="checkout-total"><span>Items</span><strong>{client_cart_count(connection, user["id"])}</strong></div>
         <div class="checkout-total"><span>Subtotal</span><strong>{format_money(subtotal)}</strong></div>
         <div class="checkout-total"><span>Available Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
-        <div class="tracker-note">Budhub checkout creates one grouped ticket for the full bag.</div>
         <form method="post" action="/cart/checkout" class="form-grid">
           <input type="hidden" name="return_to" value="/cart">
           <label>How will you get it?
@@ -3406,11 +3632,11 @@ def render_cart_page(connection, user, message=None, level="info"):
               <option value="PICKUP">Pick Up In Person</option>
             </select>
           </label>
-          <label>Delivery Address or Pickup Note<textarea name="shipping_address" placeholder="Required for delivery, optional for pickup"></textarea></label>
+          {render_address_input("shipping_address", "cart-shipping-address", "Required for delivery, optional for pickup")}
           <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
           <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
           <label>Driver Note<textarea name="customer_note" placeholder="Gate code, apartment, or delivery note"></textarea></label>
-          <button type="submit" {'disabled' if not items else ''}>Place One Grouped Order</button>
+          <button type="submit" {'disabled' if not items else ''}>Place Order</button>
         </form>
       </section>
     </section>
@@ -3425,8 +3651,9 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
         (user["id"],),
     )
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     cards = []
-    for ticket in tickets:
+    for index, ticket in enumerate(tickets):
         action = "<span class='subtle'>Payment already verified.</span>"
         if ticket["payment_status"] == "PENDING" and ticket["status"] not in {"CANCELED", "DELIVERED"}:
             action = f"""
@@ -3436,28 +3663,37 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
               <button type="submit">Verify Payment</button>
             </form>
             """
-        cards.append(
-            f"""
-            <article class="order-card">
-              <div class="order-card-head">
-                <div>
-                  <span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span>
-                  <h3>{html.escape(ticket["client_name"])}</h3>
-                </div>
-                {status_badge(ticket["status"])}
-              </div>
-                <div class="order-meta">
-                  <span>Total: {format_money(ticket["total_amount"])}</span>
-                  <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
-                  <span>Address: {html.escape(ticket["shipping_address"])}</span>
-                  <span>Payment: {html.escape(ticket["payment_status"])}</span>
-                  <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
-                </div>
-              {render_item_list(items_map.get(ticket["id"], []))}
-              <div class="ticket-actions">{action}</div>
-            </article>
-            """
-        )
+        modal_id = f"bank-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div>
+            <span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span>
+            <h3>{html.escape(ticket["client_name"])}</h3>
+          </div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+        </div>
+        """
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Address: {html.escape(ticket["shipping_address"])}</span>
+          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+        </div>
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket["id"], []))}
+        <div class="ticket-actions">{action}</div>
+        {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
+        """
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
@@ -3469,13 +3705,14 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
     {render_credit_issue_panel(connection)}
     {render_activity_list(connection, user["id"], title="Your Banking Activity")}
     """
-    return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
+    return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
 
 
 def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection, "", ())
     emergency_alerts = support_rows(connection, "WHERE support_tickets.category LIKE 'EMERGENCY_%' AND support_tickets.status != 'CLOSED'", ())
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     blocks = delivery_block_rows(connection)
     block_ticket_map = delivery_block_tickets_map(connection, [block["id"] for block in blocks])
     drivers = connection.execute("SELECT id, name FROM users WHERE role = 'driver' ORDER BY name").fetchall()
@@ -3483,7 +3720,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     open_blocks = [block for block in blocks if block["status"] == "OPEN"]
     block_options = "".join(f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>" for block in open_blocks)
     cards = []
-    for ticket in tickets:
+    for index, ticket in enumerate(tickets):
         actions = []
         if ticket["status"] == "READY_FOR_PICKUP":
             actions.append(
@@ -3562,29 +3799,39 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
                 </form>
                 """
             )
-        cards.append(
-            f"""
-            <article class="order-card">
-              <div class="order-card-head">
-                <div><span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
-                {status_badge(ticket["status"])}
-              </div>
-                <div class="order-meta">
-                  <span>Total: {format_money(ticket["total_amount"])}</span>
-                  <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
-                  <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
-                  <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
-                  <span>Payment: {html.escape(ticket["payment_status"])}</span>
-                  <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
-                </div>
-              {render_item_list(items_map.get(ticket["id"], []))}
-              {render_tracker(ticket["status"])}
-              {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
-              {f"<div class='tracker-note canceled-note'>Canceled: {html.escape(ticket['cancel_reason'])}</div>" if ticket['cancel_reason'] else ""}
-              <div class="ticket-actions">{''.join(actions) if actions else "<span class='subtle'>No dispatch action needed.</span>"}</div>
-            </article>
-            """
-        )
+        modal_id = f"dispatch-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div><span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
+        </div>
+        """
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Address: {html.escape(ticket["shipping_address"])}</span>
+          <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
+          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+        </div>
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket["id"], []))}
+        {render_tracker(ticket["status"])}
+        {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
+        {f"<div class='tracker-note canceled-note'>Canceled: {html.escape(ticket['cancel_reason'])}</div>" if ticket['cancel_reason'] else ""}
+        <div class="ticket-actions">{''.join(actions) if actions else "<span class='subtle'>No dispatch action needed.</span>"}</div>
+        {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
+        """
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
     block_cards = []
     for block in blocks:
         block_tickets = block_ticket_map.get(block["id"], [])
@@ -3665,14 +3912,15 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     {render_credit_issue_panel(connection)}
     {render_activity_list(connection, user["id"], title="Your Dispatch Activity")}
     """
-    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True)
+    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
 
 
 def render_picker_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED', 'READY_FOR_DISPATCH')", ())
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     cards = []
-    for ticket in tickets:
+    for index, ticket in enumerate(tickets):
         actions = "<span class='subtle'>Waiting on another team member.</span>"
         if ticket["status"] == "PACKING":
             actions = f"""
@@ -3690,25 +3938,34 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
               </form>
             </div>
             """
-        cards.append(
-            f"""
-            <article class="order-card">
-              <div class="order-card-head">
-                <div><span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
-                {status_badge(ticket["status"])}
-              </div>
-              <div class="order-meta">
-                <span>Total Units: {ticket["total_units"]}</span>
-                <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
-                <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Open board')}</span>
-                <span>Address: {html.escape(ticket["shipping_address"])}</span>
-              </div>
-              {render_item_list(items_map.get(ticket["id"], []))}
-              {f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>" if ticket['review_reason'] else ""}
-              {actions}
-            </article>
-            """
-        )
+        modal_id = f"picker-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div><span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>Total Units: {ticket["total_units"]}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Open board')}</span>
+        </div>
+        """
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class="order-meta">
+          <span>Total Units: {ticket["total_units"]}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Open board')}</span>
+          <span>Address: {html.escape(ticket["shipping_address"])}</span>
+        </div>
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket["id"], []))}
+        {f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>" if ticket['review_reason'] else ""}
+        {actions}
+        {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
+        """
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
@@ -3718,84 +3975,82 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
     </section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
     """
-    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user))
+    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
 
 
 def render_driver_dashboard(connection, user, message=None, level="info"):
     tickets = ticket_rows(connection, "WHERE tickets.driver_id = ? AND tickets.status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
+    message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     block_names = sorted({ticket["delivery_block_name"] for ticket in tickets if ticket["delivery_block_name"]})
     cards = []
-    for ticket in tickets:
+    for index, ticket in enumerate(tickets):
         button = "Start Route" if ticket["status"] == "DRIVER_ASSIGNED" else "Mark Delivered"
         action = "start_route" if ticket["status"] == "DRIVER_ASSIGNED" else "deliver_order"
-        cards.append(
-            f"""
-            <article class="order-card">
-              <div class="order-card-head">
-                <div><span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
-                {status_badge(ticket["status"])}
-              </div>
-                <div class="order-meta">
-                  <span>Total: {format_money(ticket["total_amount"])}</span>
-                  <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
-                  <span>Address: {html.escape(ticket["shipping_address"])}</span>
-                  <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending')}</span>
-                  <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
-                  <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
-                </div>
-                {render_item_list(items_map.get(ticket["id"], []))}
-                <div class="ticket-actions">
-                  <form method="post" action="/orders/update" class="action-stack">
-                    <input type="hidden" name="order_id" value="{ticket["id"]}">
-                    <input type="hidden" name="action" value="{action}">
-                    <button type="submit">{button}</button>
-                  </form>
-                  <div class="emergency-panel">
-                    <strong>Driver Safety Resources</strong>
-                    <div class="card-buttons emergency-buttons">
-                      <form method="post" action="/orders/update" class="inline-form">
-                        <input type="hidden" name="order_id" value="{ticket["id"]}">
-                        <input type="hidden" name="action" value="driver_emergency">
-                        <input type="hidden" name="emergency_type" value="medical_emergency">
-                        <button type="submit" class="emergency-medical-button">Medical Emergency</button>
-                      </form>
-                      <form method="post" action="/orders/update" class="inline-form">
-                        <input type="hidden" name="order_id" value="{ticket["id"]}">
-                        <input type="hidden" name="action" value="driver_emergency">
-                        <input type="hidden" name="emergency_type" value="car_accident">
-                        <button type="submit" class="danger">Car Accident</button>
-                      </form>
-                      <form method="post" action="/orders/update" class="inline-form">
-                        <input type="hidden" name="order_id" value="{ticket["id"]}">
-                        <input type="hidden" name="action" value="driver_emergency">
-                        <input type="hidden" name="emergency_type" value="robbery">
-                        <button type="submit" class="danger">Robbery</button>
-                      </form>
-                      <form method="post" action="/orders/update" class="inline-form">
-                        <input type="hidden" name="order_id" value="{ticket["id"]}">
-                        <input type="hidden" name="action" value="driver_emergency">
-                        <input type="hidden" name="emergency_type" value="traffic_stop">
-                        <button type="submit" class="button ghost">Traffic Stop</button>
-                      </form>
-                    </div>
-                    <div class="emergency-guide emergency-medical">
-                      <strong>Medical emergency:</strong> Dispatch is notified. Proceed with your emergency and await for a message to your phone.
-                    </div>
-                    <div class="emergency-guide emergency-accident">
-                      <strong>Car accident:</strong> Dial 911 now and begin the process of an accident report.
-                    </div>
-                    <div class="emergency-guide emergency-robbery">
-                      <strong>Robbery:</strong> Just comply. Your life is not worth small amounts of anything. Return to base immediately when you are safe.
-                    </div>
-                    <div class="emergency-guide emergency-traffic">
-                      <strong>Traffic stop:</strong> Do not panic. You are never traveling with an illegal amount of anything on you, so comply and you will be okay.
-                    </div>
-                  </div>
-                </div>
-            </article>
-            """
-        )
+        modal_id = f"driver-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div><span class="eyebrow">Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending')}</span>
+          <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
+        </div>
+        """
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Address: {html.escape(ticket["shipping_address"])}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending')}</span>
+          <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
+          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+        </div>
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket["id"], []))}
+        <div class="ticket-actions">
+          <form method="post" action="/orders/update" class="action-stack">
+            <input type="hidden" name="order_id" value="{ticket["id"]}">
+            <input type="hidden" name="action" value="{action}">
+            <button type="submit">{button}</button>
+          </form>
+          <div class="emergency-panel">
+            <strong>Driver Safety Resources</strong>
+            <div class="card-buttons emergency-buttons">
+              <form method="post" action="/orders/update" class="inline-form">
+                <input type="hidden" name="order_id" value="{ticket["id"]}">
+                <input type="hidden" name="action" value="driver_emergency">
+                <input type="hidden" name="emergency_type" value="medical_emergency">
+                <button type="submit" class="emergency-medical-button">Medical Emergency</button>
+              </form>
+              <form method="post" action="/orders/update" class="inline-form">
+                <input type="hidden" name="order_id" value="{ticket["id"]}">
+                <input type="hidden" name="action" value="driver_emergency">
+                <input type="hidden" name="emergency_type" value="car_accident">
+                <button type="submit" class="danger">Car Accident</button>
+              </form>
+              <form method="post" action="/orders/update" class="inline-form">
+                <input type="hidden" name="order_id" value="{ticket["id"]}">
+                <input type="hidden" name="action" value="driver_emergency">
+                <input type="hidden" name="emergency_type" value="robbery">
+                <button type="submit" class="danger">Robbery</button>
+              </form>
+              <form method="post" action="/orders/update" class="inline-form">
+                <input type="hidden" name="order_id" value="{ticket["id"]}">
+                <input type="hidden" name="action" value="driver_emergency">
+                <input type="hidden" name="emergency_type" value="traffic_stop">
+                <button type="submit" class="button ghost">Traffic Stop</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
+        """
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
@@ -3806,7 +4061,7 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
     """
-    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user))
+    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
 
 
 def render_admin_home(connection, user, message=None, level="info"):
@@ -3846,6 +4101,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     user_stats = user_stats_map(connection)
     finance = finance_snapshot(connection)
     payroll = payroll_snapshot(connection, users, user_stats)
+    order_chat_logs = recent_order_messages(connection)
     verification_queue = connection.execute(
         """
         SELECT * FROM users
@@ -3951,6 +4207,12 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
         <thead><tr><th>Ticket</th><th>Customer</th><th>Status</th><th>Total</th></tr></thead>
         <tbody>{''.join(f"<tr><td>{html.escape(ticket['ticket_number'])}</td><td>{html.escape(ticket['client_name'])}</td><td>{status_badge(ticket['status'])}</td><td>{format_money(ticket['total_amount'])}</td></tr>" for ticket in tickets[:8]) or '<tr><td colspan=\"4\">No tickets yet.</td></tr>'}</tbody>
       </table>
+    </section>
+    <section class="panel">
+      <h2>Order Chat Logs</h2>
+      <div class="order-card-grid">
+        {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(message['ticket_number'])}</span><h3>{html.escape(message['author_name'])}</h3></div><span class='menu-count'>{html.escape(message['created_at'])}</span></div><div class='order-meta'><span>Role: {html.escape(ROLE_LABELS.get(message['author_role'], message['author_role']))}</span></div><div class='reason-box'>{html.escape(message['message'])}</div></article>" for message in order_chat_logs) or '<p>No order chat messages yet.</p>'}
+      </div>
     </section>
     <section class="panel">
       <h2>ID Verification Queue</h2>
@@ -4487,9 +4749,30 @@ def handle_cart_checkout(environ, start_response, connection, user):
     except ValueError as exc:
         return redirect_with_message(start_response, return_to, str(exc))
     connection.execute("DELETE FROM cart_items WHERE user_id = ?", (user["id"],))
-    log_activity(connection, user, "CHECKOUT_BAG", f"Created grouped order ticket #{ticket_id}.", target_user_id=user["id"])
+    log_activity(connection, user, "CHECKOUT_BAG", f"Created order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
-    return redirect_with_message(start_response, return_to, f"Grouped order ticket #{ticket_id} created")
+    return redirect_with_message(start_response, return_to, f"Order #{ticket_id} created")
+
+
+def handle_order_chat(environ, start_response, connection, user):
+    gate = require_user(start_response, user)
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    ticket_id = int(data.get("order_id", "0") or 0)
+    ticket = single_ticket(connection, ticket_id)
+    if not ticket or not user_can_access_ticket(user, ticket):
+        return redirect(start_response, "/dashboard?message=Order not found")
+    message = data.get("message", "").strip()
+    if not message:
+        return redirect(start_response, "/dashboard?message=Message is required")
+    connection.execute(
+        "INSERT INTO order_messages (ticket_id, author_id, message, created_at) VALUES (?, ?, ?, ?)",
+        (ticket_id, user["id"], message, now_iso()),
+    )
+    log_activity(connection, user, "ORDER_CHAT_MESSAGE", f"Added a chat message to ticket {ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+    connection.commit()
+    return redirect(start_response, "/dashboard?message=Order message sent")
 
 
 def handle_update_order(environ, start_response, connection, user):
@@ -5031,6 +5314,8 @@ def application(environ, start_response):
             return text_response(start_response, response)
         if path == "/orders/create" and method == "POST":
             return handle_create_order(environ, start_response, connection, user)
+        if path == "/orders/chat" and method == "POST":
+            return handle_order_chat(environ, start_response, connection, user)
         if path == "/orders/update" and method == "POST":
             return handle_update_order(environ, start_response, connection, user)
         if path == "/cart/add" and method == "POST":
