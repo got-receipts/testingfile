@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import cookies
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -19,6 +19,9 @@ try:
 except ImportError:
     psycopg2 = None
     psycopg2_extras = None
+
+
+DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + ((psycopg2.IntegrityError,) if psycopg2 is not None else ())
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -694,11 +697,120 @@ class MirroringSQLiteConnection(sqlite3.Connection):
         sync_sqlite_to_postgres(self)
 
 
-def db_connection():
+class PostgreSQLCursorWrapper:
+    def __init__(self, connection):
+        self.connection = connection
+        cursor_factory = psycopg2_extras.RealDictCursor if psycopg2_extras is not None else None
+        self._cursor = connection._connection.cursor(cursor_factory=cursor_factory)
+        self.lastrowid = None
+
+    def _normalize_query(self, query):
+        normalized = query.replace("COLLATE NOCASE", "")
+        normalized = normalized.replace("?", "%s")
+        lowered = normalized.lstrip().lower()
+        match = re.match(r"insert\s+into\s+([a-z_]+)", lowered)
+        if match and match.group(1) in POSTGRES_SERIAL_TABLES and "returning" not in lowered:
+            normalized = normalized.rstrip().rstrip(";") + " RETURNING id"
+        return normalized
+
+    def execute(self, query, params=()):
+        normalized = self._normalize_query(query)
+        self._cursor.execute(normalized, params or ())
+        self.lastrowid = None
+        if self._cursor.description:
+            column_names = [description.name if hasattr(description, "name") else description[0] for description in self._cursor.description]
+            if column_names == ["id"] and normalized.lstrip().lower().startswith("insert into"):
+                row = self._cursor.fetchone()
+                self.lastrowid = row["id"] if isinstance(row, dict) else row[0]
+        return self
+
+    def executemany(self, query, seq_of_params):
+        normalized = self._normalize_query(query)
+        self._cursor.executemany(normalized, seq_of_params)
+        self.lastrowid = None
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def close(self):
+        self._cursor.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+
+class PostgreSQLConnectionWrapper:
+    def __init__(self, database_url):
+        self._connection = psycopg2.connect(database_url)
+
+    def cursor(self):
+        return PostgreSQLCursorWrapper(self)
+
+    def execute(self, query, params=()):
+        cursor = self.cursor()
+        try:
+            cursor.execute(query, params)
+        except Exception:
+            cursor.close()
+            raise
+        return cursor
+
+    def executemany(self, query, seq_of_params):
+        cursor = self.cursor()
+        try:
+            cursor.executemany(query, seq_of_params)
+        except Exception:
+            cursor.close()
+            raise
+        return cursor
+
+    def executescript(self, script):
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type:
+            self.rollback()
+        else:
+            self.commit()
+        self.close()
+
+
+def is_postgres_connection(connection):
+    return isinstance(connection, PostgreSQLConnectionWrapper)
+
+
+def sqlite_connection():
     connection = sqlite3.connect(DB_PATH, factory=MirroringSQLiteConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def db_connection():
+    if postgres_enabled():
+        return PostgreSQLConnectionWrapper(postgres_database_url())
+    return sqlite_connection()
 
 
 def postgres_database_url():
@@ -710,13 +822,23 @@ def postgres_enabled():
 
 
 def create_postgres_schema(connection):
-    with connection.cursor() as cursor:
-        for statement in POSTGRES_CREATE_STATEMENTS:
-            cursor.execute(statement)
+    for statement in POSTGRES_CREATE_STATEMENTS:
+        connection.execute(statement)
     connection.commit()
 
 
 def sqlite_table_columns(connection, table_name):
+    if is_postgres_connection(connection):
+        rows = connection.execute(
+            """
+            SELECT column_name AS name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (table_name,),
+        ).fetchall()
+        return [row["name"] for row in rows]
     return [row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()]
 
 
@@ -766,6 +888,37 @@ def sync_sqlite_to_postgres(sqlite_connection):
         POSTGRES_SYNC_IN_PROGRESS = False
 
 
+def bootstrap_postgres_from_sqlite():
+    if not postgres_enabled() or not os.path.exists(DB_PATH):
+        return
+    try:
+        with PostgreSQLConnectionWrapper(postgres_database_url()) as pg_connection:
+            create_postgres_schema(pg_connection)
+            row = pg_connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+            if row and int(row["count"] or 0) > 0:
+                return
+            with sqlite_connection() as legacy_connection:
+                for table_name in POSTGRES_SYNC_TABLES:
+                    columns = sqlite_table_columns(legacy_connection, table_name)
+                    if not columns:
+                        continue
+                    rows = legacy_connection.execute(f"SELECT {', '.join(columns)} FROM {table_name}").fetchall()
+                    if rows:
+                        values = [tuple(row[column] for column in columns) for row in rows]
+                        placeholders = ", ".join(["%s"] * len(columns))
+                        insert_sql = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+                        if psycopg2_extras is not None:
+                            with pg_connection.cursor() as cursor:
+                                psycopg2_extras.execute_batch(cursor._cursor, insert_sql, values, page_size=200)
+                        else:
+                            pg_connection.executemany(insert_sql, values)
+                    with pg_connection.cursor() as cursor:
+                        reset_postgres_sequence(cursor._cursor, table_name)
+            pg_connection.commit()
+    except Exception as exc:
+        print(f"PostgreSQL bootstrap skipped: {exc}")
+
+
 def init_postgres_db():
     global POSTGRES_INIT_ATTEMPTED
     if POSTGRES_INIT_ATTEMPTED:
@@ -774,14 +927,40 @@ def init_postgres_db():
     if not postgres_enabled():
         return
     try:
-        with psycopg2.connect(postgres_database_url()) as connection:
+        with PostgreSQLConnectionWrapper(postgres_database_url()) as connection:
             create_postgres_schema(connection)
+        bootstrap_postgres_from_sqlite()
     except Exception as exc:
         print(f"PostgreSQL initialization skipped: {exc}")
 
 
 def now_iso():
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def time_window_cutoff(modifier):
+    raw_value = (modifier or "").strip().lower()
+    match = re.match(r"^(-?\d+)\s+(day|days|hour|hours|minute|minutes)$", raw_value)
+    if not match:
+        return now_iso()
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if "day" in unit:
+        delta = timedelta(days=abs(amount))
+    elif "hour" in unit:
+        delta = timedelta(hours=abs(amount))
+    else:
+        delta = timedelta(minutes=abs(amount))
+    return (datetime.utcnow() - delta).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def hash_password(password):
@@ -1071,7 +1250,7 @@ def seed_leafly_strains(connection):
 
 
 def leafly_strain_rows(connection):
-    return connection.execute("SELECT * FROM leafly_strains ORDER BY name COLLATE NOCASE ASC").fetchall()
+    return connection.execute("SELECT * FROM leafly_strains ORDER BY LOWER(name) ASC, id ASC").fetchall()
 
 
 def infer_leafly_reference(connection, product_name):
@@ -1569,15 +1748,35 @@ def text_response(start_response, body, status="200 OK", content_type="text/html
 
 
 def table_exists(connection, name):
-    row = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (name,),
-    ).fetchone()
+    if is_postgres_connection(connection):
+        row = connection.execute(
+            """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (name,),
+        ).fetchone()
+    else:
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
     return bool(row)
 
 
 def column_exists(connection, table_name, column_name):
-    columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    if is_postgres_connection(connection):
+        columns = connection.execute(
+            """
+            SELECT column_name AS name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            """,
+            (table_name,),
+        ).fetchall()
+    else:
+        columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     return any(column["name"] == column_name for column in columns)
 
 
@@ -1697,8 +1896,11 @@ def init_db():
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     init_postgres_db()
     with db_connection() as connection:
-        connection.executescript(
-            """
+        if is_postgres_connection(connection):
+            create_postgres_schema(connection)
+        else:
+            connection.executescript(
+                """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -1949,8 +2151,8 @@ def init_db():
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-            """
-        )
+                """
+            )
         ensure_column(connection, "users", "account_state TEXT NOT NULL DEFAULT 'ACTIVE'")
         ensure_column(connection, "users", "account_reason TEXT")
         ensure_column(connection, "users", "phone TEXT")
@@ -2093,15 +2295,23 @@ def render_help_button(user):
 
 
 def average_delivery_eta_minutes(connection, modifier="-1 day"):
-    row = connection.execute(
-        """
-        SELECT COALESCE(AVG((julianday(updated_at) - julianday(created_at)) * 24 * 60), 0) AS avg_minutes
-        FROM tickets
-        WHERE status = 'DELIVERED' AND updated_at >= datetime('now', ?)
-        """,
-        (modifier,),
-    ).fetchone()
-    return float((row["avg_minutes"] if row else 0) or 0)
+    cutoff = time_window_cutoff(modifier)
+    rows = connection.execute(
+        "SELECT created_at, updated_at FROM tickets WHERE status = 'DELIVERED' AND updated_at >= ?",
+        (cutoff,),
+    ).fetchall()
+    if not rows:
+        return 0.0
+    total_minutes = 0.0
+    counted = 0
+    for row in rows:
+        created_at = parse_timestamp(row["created_at"])
+        updated_at = parse_timestamp(row["updated_at"])
+        if not created_at or not updated_at:
+            continue
+        total_minutes += max(0.0, (updated_at - created_at).total_seconds() / 60.0)
+        counted += 1
+    return total_minutes / counted if counted else 0.0
 
 
 def eta_label(connection):
@@ -2600,14 +2810,16 @@ def time_clock_summary(connection, user_id):
         """,
         (user_id,),
     ).fetchall()
-    weekly_hours = connection.execute(
-        """
-        SELECT COALESCE(SUM((julianday(COALESCE(clock_out_at, CURRENT_TIMESTAMP)) - julianday(clock_in_at)) * 24), 0) AS hours
-        FROM time_clock_entries
-        WHERE user_id = ? AND clock_in_at >= datetime('now', '-7 days')
-        """,
-        (user_id,),
-    ).fetchone()["hours"]
+    cutoff = time_window_cutoff("-7 days")
+    weekly_hours = 0.0
+    for entry in entries:
+        if str(entry["clock_in_at"]) < cutoff:
+            continue
+        clock_in = parse_timestamp(entry["clock_in_at"])
+        clock_out = parse_timestamp(entry["clock_out_at"]) or datetime.utcnow()
+        if not clock_in:
+            continue
+        weekly_hours += max(0.0, (clock_out - clock_in).total_seconds() / 3600.0)
     return entries, weekly_hours or 0
 
 
@@ -2654,8 +2866,9 @@ def personal_activity_rows(connection, user_id, limit=12):
 
 
 def delivered_sales_sum(connection, modifier):
+    cutoff = time_window_cutoff(modifier)
     row = connection.execute(
-        f"""
+        """
         SELECT COALESCE(SUM(
             COALESCE(total_amount, 0) - COALESCE(discount_amount, 0) - COALESCE(loyalty_discount_amount, 0) - COALESCE(credit_applied, 0)
         ), 0) AS total
@@ -2671,9 +2884,9 @@ def delivered_sales_sum(connection, modifier):
             WHERE tickets.status = 'DELIVERED'
             GROUP BY tickets.id
         ) delivered
-        WHERE delivered.updated_at >= datetime('now', ?)
+        WHERE delivered.updated_at >= ?
         """,
-        (modifier,),
+        (cutoff,),
     ).fetchone()
     return row["total"] if row else 0
 
@@ -5828,7 +6041,7 @@ def handle_create_coupon(environ, start_response, connection, user):
             (code, data.get("discount_type", "FLAT"), float(data.get("discount_value", "0")), uses_remaining, now_iso()),
         )
         connection.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         return redirect(start_response, "/admin?message=Coupon code already exists")
     return redirect(start_response, "/admin?message=Coupon created")
 
