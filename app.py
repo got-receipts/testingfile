@@ -1032,6 +1032,34 @@ def infer_leafly_reference(connection, product_name):
     return None
 
 
+def purge_removed_demo_accounts(connection):
+    targets = connection.execute(
+        "SELECT id, email FROM users WHERE lower(email) IN (?, ?)",
+        ("kj.zeoli@gmail.com", "kenneth.zeoli@archived.local"),
+    ).fetchall()
+    for target in targets:
+        user_id = target["id"]
+        linked = connection.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM tickets WHERE client_id = ? OR banker_id = ? OR dispatcher_id = ? OR picker_id = ? OR driver_id = ?) +
+              (SELECT COUNT(*) FROM support_tickets WHERE user_id = ? OR opened_by = ? OR assigned_to = ?) +
+              (SELECT COUNT(*) FROM support_messages WHERE author_id = ?) +
+              (SELECT COUNT(*) FROM order_messages WHERE author_id = ?) +
+              (SELECT COUNT(*) FROM credit_ledger WHERE user_id = ? OR issued_by = ?) +
+              (SELECT COUNT(*) FROM activity_logs WHERE actor_id = ? OR target_user_id = ?) AS linked_count
+            """,
+            (user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id),
+        ).fetchone()["linked_count"]
+        if linked:
+            continue
+        connection.execute("DELETE FROM cart_items WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM user_stats WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM time_clock_entries WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+
 def product_image_proxy_url(image_url, source_url=""):
     if not image_url:
         if source_url:
@@ -1677,6 +1705,7 @@ def seed_defaults(connection):
         )
 
     sync_launch_menu(connection)
+    purge_removed_demo_accounts(connection)
 
 
 def seed_user_stats(connection):
@@ -1781,8 +1810,11 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
       if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) {
         return;
       }
+      if (document.querySelector('.modal-shell:not(.is-hidden)')) {
+        return;
+      }
       window.location.reload();
-    }, 30000);
+    }, 60000);
   </script>"""
     nav_eta = ""
     if user:
@@ -1839,7 +1871,6 @@ def login_form(error="", notice=""):
     return f"""
     <section class="panel narrow">
       <h2>Login</h2>
-      <p>Sign in to the BudHub workspace for customers, operators, dispatch, drivers, or engineering support across the 518 market.</p>
       {flash_message(error, "error")}
       <form method="post" action="/login" class="form-grid">
         <label>Email<input type="email" name="email" required></label>
@@ -2629,7 +2660,6 @@ def render_order_success_widget(message):
             <h3>Your order was placed</h3>
           </div>
         </div>
-        <p>Your order is in the system and has been sent into the workflow.</p>
         <div class="hero-actions">
           <a class="button" href="/dashboard">OK</a>
         </div>
@@ -2667,6 +2697,48 @@ def render_payment_block_widget(message):
         "Bank verification still required",
         "Delivery stays paused until the in-house bank verifies payment for this ticket.",
     )
+
+
+def render_picker_packed_widget(message):
+    if message != "Packed and returned to dispatch":
+        return ""
+    return render_center_notice_widget(
+        "picker-packed-modal",
+        "Packing Complete",
+        "Packed and returned to dispatch",
+        "This ticket was packed successfully and moved back to the dispatch board.",
+    )
+
+
+def render_banker_verified_widget(message):
+    if message != "Payment verified":
+        return ""
+    return render_center_notice_widget(
+        "banker-verified-modal",
+        "Payment Verified",
+        "Payment verified",
+        "The ticket payment was verified successfully and moved forward in the workflow.",
+    )
+
+
+def render_driver_action_widget(message):
+    config = {
+        "Route started": (
+            "driver-route-started-modal",
+            "Driver Update",
+            "Route started",
+            "The active route has been started and is now in delivery progress.",
+        ),
+        "Delivery completed": (
+            "driver-delivered-modal",
+            "Driver Update",
+            "Delivery completed",
+            "The ticket was marked delivered successfully.",
+        ),
+    }.get(message)
+    if not config:
+        return ""
+    return render_center_notice_widget(*config)
 
 
 def render_driver_emergency_widget(ticket, index):
@@ -3180,10 +3252,10 @@ def render_account_stats_panel(connection, user):
     dispatched_count = connection.execute("SELECT COUNT(*) AS count FROM tickets WHERE dispatcher_id = ? AND status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'READY_FOR_PICKUP')", (user["id"],)).fetchone()["count"] if user["role"] == "dispatcher" else 0
     return f"""
     <section class="stats-row">
-      <div class="stat-card"><span>Hourly Rate</span><strong>{format_money((stats['hourly_rate'] if stats else 0) or 0)}</strong></div>
-      <div class="stat-card"><span>Total Trips</span><strong>{(stats['total_trips'] if stats else 0) or delivered_count}</strong></div>
-      <div class="stat-card"><span>Orders Picked</span><strong>{(stats['total_orders_picked'] if stats else 0) or picked_count}</strong></div>
-      <div class="stat-card"><span>Orders Dispatched</span><strong>{(stats['total_orders_dispatched'] if stats else 0) or dispatched_count}</strong></div>
+      <div class="stat-card"><span>Hourly Rate:</span><strong>{format_money((stats['hourly_rate'] if stats else 0) or 0)}</strong></div>
+      <div class="stat-card"><span>Total Trips:</span><strong>{(stats['total_trips'] if stats else 0) or delivered_count}</strong></div>
+      <div class="stat-card"><span>Orders Picked:</span><strong>{(stats['total_orders_picked'] if stats else 0) or picked_count}</strong></div>
+      <div class="stat-card"><span>Orders Dispatched:</span><strong>{(stats['total_orders_dispatched'] if stats else 0) or dispatched_count}</strong></div>
     </section>
     """
 
@@ -3339,26 +3411,36 @@ def user_can_access_ticket(user, ticket):
 def render_order_chat(ticket, user, message_rows):
     if not user_can_access_ticket(user, ticket):
         return ""
+    widget_id = f"order-chat-widget-{ticket['id']}"
+    chat_locked = ticket["status"] == "DELIVERED"
     message_items = "".join(
         f"<div class='chat-message'><strong>{html.escape(row['author_name'])}</strong><span class='eyebrow'>{html.escape(ROLE_LABELS.get(row['author_role'], row['author_role']))}</span><p>{html.escape(row['message'])}</p><small>{html.escape(row['created_at'])}</small></div>"
         for row in message_rows
     ) or "<p>No order chat yet.</p>"
     return f"""
     <section class="panel order-chat-panel">
-      <div class="panel-head">
-        <div>
-          <span class="eyebrow">Order Chat</span>
-          <h3>Ticket Messages</h3>
-        </div>
-        <span class="chat-pill">Chat</span>
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Order Chat</span>
+            <h3>Ticket Messages</h3>
+          </div>
+        <button type="button" class="button ghost chat-launch{' is-disabled' if chat_locked else ''}" data-open-order-chat="{widget_id}" {'disabled' if chat_locked else ''}>{'Messaging Closed' if chat_locked else 'Message'}</button>
       </div>
-      <div class="chat-thread">{message_items}</div>
-      <form method="post" action="/orders/chat" class="action-stack">
-        <input type="hidden" name="order_id" value="{ticket['id']}">
-        <label>Message<textarea name="message" required placeholder="Send a note about this order"></textarea></label>
-        <button type="submit">Send Message</button>
-      </form>
     </section>
+    <div class="modal-shell is-hidden" id="{widget_id}">
+      <div class="modal-backdrop" data-close-order-chat="{widget_id}"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Order Chat</span>
+            <h3>Ticket Messages</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-order-chat="{widget_id}">Close</button>
+        </div>
+        <div class="chat-thread">{message_items}</div>
+        {"<div class='tracker-note'>Messaging is closed for completed tickets.</div>" if chat_locked else f"<form method='post' action='/orders/chat' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><label>Message<textarea name='message' required placeholder='Send a note about this order'></textarea></label><button type='submit'>Send Message</button></form>"}
+      </div>
+    </div>
     """
 
 
@@ -3402,6 +3484,38 @@ def render_ticket_modal_script(open_ticket_id=None):
         document.querySelectorAll('[data-close-ticket-modal]').forEach(function (button) {
           button.addEventListener('click', function () {
             var modal = document.getElementById(button.getAttribute('data-close-ticket-modal'));
+            if (modal) {
+              modal.classList.add('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-open-order-chat]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-open-order-chat'));
+            if (modal) {
+              modal.classList.remove('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-close-order-chat]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-close-order-chat'));
+            if (modal) {
+              modal.classList.add('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-open-driver-history]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-open-driver-history'));
+            if (modal) {
+              modal.classList.remove('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-close-driver-history]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-close-driver-history'));
             if (modal) {
               modal.classList.add('is-hidden');
             }
@@ -4025,13 +4139,13 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
+    {render_banker_verified_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Waiting for Verification</span><strong>{sum(1 for ticket in tickets if ticket['payment_status'] == 'PENDING' and ticket['status'] not in {'CANCELED', 'DELIVERED'})}</strong></div>
       <div class="stat-card"><span>Tickets on Desk</span><strong>{len(tickets)}</strong></div>
     </section>
     <section class="panel"><h2>In-House Bank</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No payment reviews waiting.</p>'}</div></section>
     {render_credit_issue_panel(connection)}
-    {render_activity_list(connection, user["id"], title="Your Banking Activity")}
     """
     return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
 
@@ -4369,6 +4483,7 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
+    {render_picker_packed_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Ready to Pack</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'PACKING')}</strong></div>
       <div class="stat-card"><span>Visible Tickets</span><strong>{len(tickets)}</strong></div>
@@ -4380,9 +4495,12 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
 
 def render_driver_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(connection, "WHERE tickets.driver_id = ? AND tickets.status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')", (user["id"],))
-    items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
-    message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    history_tickets = ticket_rows(connection, "WHERE tickets.driver_id = ? AND tickets.status = 'DELIVERED'", (user["id"],))
+    driver_ticket_ids = [ticket["id"] for ticket in tickets] + [ticket["id"] for ticket in history_tickets]
+    items_map = ticket_items_map(connection, driver_ticket_ids)
+    message_map = order_messages_map(connection, driver_ticket_ids)
     block_names = sorted({ticket["delivery_block_name"] for ticket in tickets if ticket["delivery_block_name"]})
+    active_ticket_number = next((ticket["ticket_number"] for ticket in tickets if ticket["status"] == "OUT_FOR_DELIVERY"), "")
     cards = []
     for index, ticket in enumerate(tickets):
         button = "Start Route" if ticket["status"] == "DRIVER_ASSIGNED" else "Mark Delivered"
@@ -4397,6 +4515,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
+          <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
         </div>
         """
         maps_link = google_maps_link(ticket["shipping_address"])
@@ -4408,6 +4527,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
+          <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
           <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
         </div>
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
@@ -4424,16 +4544,64 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
         cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
+    history_cards = []
+    for index, ticket in enumerate(history_tickets):
+        modal_id = f"driver-history-ticket-{ticket['id']}-{index}"
+        summary_html = f"""
+        <div class="order-card-head">
+          <div><span class="eyebrow">Delivered Ticket {html.escape(ticket["ticket_number"])}</span><h3>{html.escape(ticket["client_name"])}</h3></div>
+          {status_badge(ticket["status"])}
+        </div>
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Direct assignment')}</span>
+          <span>Completed Route</span>
+        </div>
+        """
+        maps_link = google_maps_link(ticket["shipping_address"])
+        maps_embed = google_maps_embed_link(ticket["shipping_address"])
+        detail_html = f"""
+        <div class="order-meta">
+          <span>Total: {format_money(ticket["total_amount"])}</span>
+          <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Address: {html.escape(ticket["shipping_address"])}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Direct assignment')}</span>
+          <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
+          <span>Completed Ticket: Yes</span>
+        </div>
+        {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
+        {render_item_list(items_map.get(ticket["id"], []))}
+        {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
+        {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
+        """
+        history_cards.append(render_ticket_modal(modal_id, f"Delivered Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
     {render_payment_block_widget(message)}
+    {render_driver_action_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Assigned Blocks</span><strong>{len(block_names)}</strong></div>
       <div class="stat-card"><span>Assigned Routes</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'DRIVER_ASSIGNED')}</strong></div>
       <div class="stat-card"><span>Live Deliveries</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'OUT_FOR_DELIVERY')}</strong></div>
+      <div class="stat-card"><span>Active Ticket</span><strong>{html.escape(active_ticket_number or 'None')}</strong></div>
+      <div class="stat-card"><span>Completed Orders</span><strong>{len(history_tickets)}</strong></div>
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
+    <section class="panel"><div class="panel-head"><div><span class="eyebrow">Driver History</span><h2>Completed Orders</h2></div><button type="button" class="button ghost" data-open-driver-history="driver-history-widget">Open History</button></div></section>
+    <div class="modal-shell is-hidden" id="driver-history-widget">
+      <div class="modal-backdrop" data-close-driver-history="driver-history-widget"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Driver History</span>
+            <h3>Completed Orders</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-driver-history="driver-history-widget">Close</button>
+        </div>
+        <div class="order-card-grid">{''.join(history_cards) if history_cards else '<p>No completed driver history yet.</p>'}</div>
+      </div>
+    </div>
     """
     return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_driver_emergency_widget_script())
 
@@ -4441,7 +4609,6 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
 def render_admin_home(connection, user, message=None, level="info"):
     title = "Engineer Dashboard" if user["role"] == "helpdesk" else "Admin Dashboard"
     finance = finance_snapshot(connection)
-    avg_eta = eta_label(connection)
     body = f"""
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]}</strong></div>
@@ -4451,7 +4618,6 @@ def render_admin_home(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
       <div class="stat-card"><span>Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
       <div class="stat-card"><span>Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
-      <div class="stat-card"><span>Average ETA Today</span><strong>{html.escape(avg_eta.replace('ETA Today: ', ''))}</strong></div>
     </section>
     <section class="admin-grid">
       <section class="panel">
@@ -4478,7 +4644,6 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     finance = finance_snapshot(connection)
     payroll = payroll_snapshot(connection, users, user_stats)
     order_chat_logs = recent_order_messages(connection)
-    avg_eta = eta_label(connection)
     verification_queue = connection.execute(
         """
         SELECT * FROM users
@@ -4562,7 +4727,6 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
       <div class="stat-card"><span>Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
       <div class="stat-card"><span>Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
-      <div class="stat-card"><span>Average ETA Today</span><strong>{html.escape(avg_eta.replace('ETA Today: ', ''))}</strong></div>
       {engineer_stats}
     </section>
     <section class="panel">
