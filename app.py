@@ -719,7 +719,11 @@ class PostgreSQLCursorWrapper:
 
     def execute(self, query, params=()):
         normalized = self._normalize_query(query)
-        self._cursor.execute(normalized, params or ())
+        if params:
+            statement = self._cursor.mogrify(normalized, params)
+            self._cursor.execute(statement)
+        else:
+            self._cursor.execute(normalized)
         self.lastrowid = None
         if self._cursor.description:
             column_names = [description.name if hasattr(description, "name") else description[0] for description in self._cursor.description]
