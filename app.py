@@ -291,23 +291,23 @@ MENU_SECTION_NOTES = {
 }
 LAUNCH_MENU = [
     {
-        "name": "THC Syrup 1000MG",
+        "name": "Blue Dream Syrup 1000MG",
         "category": "Edibles",
-        "description": "1000MG syrup. Flavors: Cherry, Grape, Strawberry Kiwi.",
+        "description": "1000MG infused syrup powered by Blue Dream. Flavors: Cherry, Grape, Strawberry Kiwi.",
         "price": 25.50,
         "stock": 15,
     },
     {
-        "name": "1G Diamonds",
+        "name": "Gelato Diamonds 1G",
         "category": "Concentrates",
-        "description": "1 gram concentrate jar.",
+        "description": "1 gram concentrate jar with Gelato reference.",
         "price": 25.50,
         "stock": 12,
     },
     {
-        "name": "3G Diamonds",
+        "name": "Wedding Cake Diamonds 3G",
         "category": "Concentrates",
-        "description": "3 gram concentrate jar.",
+        "description": "3 gram concentrate jar with Wedding Cake reference.",
         "price": 70.50,
         "stock": 10,
     },
@@ -326,7 +326,7 @@ LAUNCH_MENU = [
         "stock": 14,
     },
     {
-        "name": "Electric Lemon DS 7G",
+        "name": "Blue Dream Reserve DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $15.50.",
         "price": 15.50,
@@ -340,14 +340,14 @@ LAUNCH_MENU = [
         "stock": 10,
     },
     {
-        "name": "Pink Mimosas Smalls DS 7G",
+        "name": "Mimosa Smalls DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $17.50.",
         "price": 17.50,
         "stock": 10,
     },
     {
-        "name": "Cotton Candy Smalls DS 7G",
+        "name": "White Widow Smalls DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $17.50.",
         "price": 17.50,
@@ -400,7 +400,7 @@ LAUNCH_MENU = [
         "stock": 10,
     },
     {
-        "name": "Lemon Cherry Gelato DS 7G",
+        "name": "Gelato Reserve DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
@@ -414,7 +414,7 @@ LAUNCH_MENU = [
         "stock": 10,
     },
     {
-        "name": "Frozen Runtz DS 7G",
+        "name": "Gelatti Reserve DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $25.50.",
         "price": 25.50,
@@ -462,7 +462,7 @@ LAUNCH_MENU = [
         "stock": 8,
     },
     {
-        "name": "Garlic Breath DS 7G",
+        "name": "GMO Cookies Reserve DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
         "price": 35.50,
@@ -515,7 +515,7 @@ LAUNCH_MENU = [
         "stock": 8,
     },
     {
-        "name": "Gorilla Glue #4 DS 7G",
+        "name": "OG Kush Platinum DS 7G",
         "category": "Flower",
         "description": "Double Stuffed 7G flower. Tier priced at $35.50.",
         "price": 35.50,
@@ -1137,10 +1137,10 @@ def sync_launch_menu(connection):
     for item in LAUNCH_MENU:
         leafly_reference = infer_leafly_reference(connection, item["name"])
         menu_group, strain_type = infer_product_metadata(item["name"], item["category"], item["description"])
-        if leafly_reference and item["category"] in {"Flower", "Concentrates"}:
+        if leafly_reference:
             item.setdefault("source_url", leafly_reference["source_url"])
             item.setdefault("image_url", leafly_reference["image_url"])
-            if strain_type == "Unspecified":
+            if item["category"] in {"Flower", "Concentrates"} and strain_type == "Unspecified":
                 strain_type = normalize_strain_type(leafly_reference["strain_type"])
         existing = connection.execute("SELECT id FROM products WHERE name = ?", (item["name"],)).fetchone()
         if existing:
