@@ -169,7 +169,7 @@ nav {
 .hero {
   padding: 2rem;
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
+  grid-template-columns: minmax(0, 1.85fr) minmax(220px, 300px);
   gap: 1.5rem;
   margin-bottom: 2rem;
   background:
@@ -196,6 +196,11 @@ nav {
   display: flex;
   flex-direction: column;
   justify-content: center;
+}
+
+.hero-side {
+  align-content: start;
+  justify-items: start;
 }
 
 .product-grid,
@@ -273,8 +278,11 @@ nav {
 .hero-summary {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(0, 0, 0, 0.14));
   border-radius: 20px;
-  padding: 1.1rem 1.2rem;
+  padding: 0.95rem 1.05rem;
   border: 1px solid rgba(160, 245, 164, 0.14);
+  width: 100%;
+  max-width: 280px;
+  min-height: 0;
 }
 
 .notice-strip {
@@ -289,8 +297,8 @@ nav {
 
 .hero-summary strong {
   display: block;
-  font-size: 1.35rem;
-  margin: 0.35rem 0;
+  font-size: 1.1rem;
+  margin: 0.25rem 0 0;
 }
 
 .hero-media-frame {
