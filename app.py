@@ -708,7 +708,8 @@ class PostgreSQLCursorWrapper:
         self._prefetched_row = None
 
     def _normalize_query(self, query):
-        normalized = query.replace("COLLATE NOCASE", "")
+        normalized = query.replace("%", "%%")
+        normalized = normalized.replace("COLLATE NOCASE", "")
         normalized = normalized.replace("?", "%s")
         lowered = normalized.lstrip().lower()
         match = re.match(r"insert\s+into\s+([a-z_]+)", lowered)
