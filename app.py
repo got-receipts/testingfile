@@ -34,6 +34,27 @@ POSTGRES_INIT_ATTEMPTED = False
 POSTGRES_SYNC_IN_PROGRESS = False
 EMPLOYEE_ROLES = {"banker", "dispatcher", "picker", "driver"}
 ALLOWED_PRODUCT_IMAGE_HOSTS = {"images.leafly.com", "leafly-public.imgix.net"}
+PAYMENT_METHOD_OPTIONS = ["VENMO", "CHIME", "CASH_APP", "ZELLE", "APPLE_PAY", "GOOGLE_PAY", "CASH"]
+PAYMENT_METHOD_LABELS = {
+    "VENMO": "Venmo",
+    "CHIME": "Chime",
+    "CASH_APP": "Cash App",
+    "ZELLE": "Zelle",
+    "APPLE_PAY": "Apple Pay",
+    "GOOGLE_PAY": "Google Pay",
+    "CASH": "Cash",
+}
+DEFAULT_PAYMENT_DESTINATIONS = [
+    ("VENMO", "Venmo", "Rudolph Bowen", "https://venmo.com/u/Rudolph-Bowen", 1, 1),
+    ("VENMO", "Venmo", "Jesenia Fields", "https://venmo.com/u/Jesenia-Fields", 2, 1),
+    ("CHIME", "Chime", "Jesenia Fields", "https://app.chime.com/link/qr?u=Jesenia-Fields", 1, 1),
+    ("CHIME", "Chime", "SirMajesty", "https://app.chime.com/link/qr?u=SirMajesty", 2, 1),
+    ("CASH_APP", "Cash App", "$merchfactory", "$merchfactory", 1, 1),
+    ("ZELLE", "Zelle", "BudHub Zelle Desk", "", 1, 0),
+    ("APPLE_PAY", "Apple Pay", "BudHub Apple Pay Desk", "", 1, 0),
+    ("GOOGLE_PAY", "Google Pay", "BudHub Google Pay Desk", "", 1, 0),
+    ("CASH", "Cash", "Pay in Person", "Bring cash for pickup orders or pay the driver directly at delivery.", 1, 1),
+]
 
 POSTGRES_CREATE_STATEMENTS = [
     """
@@ -116,6 +137,7 @@ POSTGRES_CREATE_STATEMENTS = [
         ticket_number TEXT UNIQUE NOT NULL,
         client_id INTEGER NOT NULL,
         fulfillment_type TEXT DEFAULT 'DELIVERY',
+        payment_method TEXT DEFAULT 'CHIME',
         shipping_address TEXT NOT NULL,
         customer_note TEXT,
         status TEXT NOT NULL,
@@ -205,6 +227,19 @@ POSTGRES_CREATE_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS payment_destinations (
+        id SERIAL PRIMARY KEY,
+        method TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        account_name TEXT NOT NULL,
+        payment_link TEXT,
+        sort_order INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS coupons (
         id SERIAL PRIMARY KEY,
         code TEXT UNIQUE NOT NULL,
@@ -261,6 +296,7 @@ POSTGRES_SYNC_TABLES = [
     "order_messages",
     "activity_logs",
     "guest_help_requests",
+    "payment_destinations",
     "coupons",
     "credit_ledger",
     "user_stats",
@@ -935,6 +971,7 @@ def render_cart_widget(connection, user, filters):
             <option value="PICKUP">Pick Up In Person</option>
           </select>
         </label>
+        {render_payment_method_input("payment_method", "CHIME")}
         {render_address_input("shipping_address", "bag-shipping-address", "Required for delivery, optional for pickup")}
         <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
         <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
@@ -1030,6 +1067,95 @@ def infer_leafly_reference(connection, product_name):
         if row["name"].lower() in cleaned.lower() or cleaned.lower() in row["name"].lower():
             return row
     return None
+
+
+def payment_method_label(payment_method):
+    return PAYMENT_METHOD_LABELS.get((payment_method or "").upper(), "Payment")
+
+
+def seed_payment_destinations(connection):
+    for method, display_name, account_name, payment_link, sort_order, active in DEFAULT_PAYMENT_DESTINATIONS:
+        existing = connection.execute(
+            "SELECT id FROM payment_destinations WHERE method = ? AND account_name = ?",
+            (method, account_name),
+        ).fetchone()
+        if existing:
+            connection.execute(
+                """
+                UPDATE payment_destinations
+                SET display_name = ?, payment_link = ?, sort_order = ?, active = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (display_name, payment_link, sort_order, active, now_iso(), existing["id"]),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO payment_destinations (method, display_name, account_name, payment_link, sort_order, active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (method, display_name, account_name, payment_link, sort_order, active, now_iso(), now_iso()),
+            )
+
+
+def payment_destination_rows(connection, method=None, active_only=False):
+    clauses = []
+    params = []
+    if method:
+        clauses.append("method = ?")
+        params.append((method or "").upper())
+    if active_only:
+        clauses.append("active = 1")
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return connection.execute(
+        f"""
+        SELECT *
+        FROM payment_destinations
+        {where_clause}
+        ORDER BY method ASC, sort_order ASC, id ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def render_payment_method_input(field_name, selected_value=""):
+    selected_value = (selected_value or "CHIME").upper()
+    options = "".join(
+        f"<option value='{value}' {'selected' if selected_value == value else ''}>{html.escape(PAYMENT_METHOD_LABELS[value])}</option>"
+        for value in PAYMENT_METHOD_OPTIONS
+    )
+    return f"""
+    <label>Payment Method
+      <select name="{html.escape(field_name)}">
+        {options}
+      </select>
+    </label>
+    """
+
+
+def render_payment_instructions(ticket):
+    rows = []
+    try:
+        with db_connection() as payment_connection:
+            rows = payment_destination_rows(payment_connection, ticket["payment_method"], active_only=True)
+    except Exception:
+        rows = []
+    due_amount = format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))
+    if rows:
+        destinations = "".join(
+            f"<div class='item-pill'><strong>{html.escape(row['account_name'])}</strong><span>{html.escape(row['payment_link'] or row['display_name'])}</span></div>"
+            for row in rows
+        )
+        details = f"<div class='item-pill-list'>{destinations}</div>"
+    else:
+        details = "<div class='tracker-note'>No payment destination is configured for this method yet.</div>"
+    return f"""
+    <div class="reason-box">
+      <strong>Payment Method:</strong> {html.escape(payment_method_label(ticket["payment_method"]))}<br>
+      <strong>Amount Due:</strong> {due_amount}
+    </div>
+    {details}
+    """
 
 
 def purge_removed_demo_accounts(connection):
@@ -1486,6 +1612,7 @@ def init_db():
                 ticket_number TEXT NOT NULL UNIQUE,
                 client_id INTEGER NOT NULL,
                 fulfillment_type TEXT NOT NULL DEFAULT 'DELIVERY',
+                payment_method TEXT NOT NULL DEFAULT 'CHIME',
                 shipping_address TEXT NOT NULL,
                 customer_note TEXT,
                 status TEXT NOT NULL,
@@ -1598,6 +1725,18 @@ def init_db():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS payment_destinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                method TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                account_name TEXT NOT NULL,
+                payment_link TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS coupons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code TEXT NOT NULL UNIQUE,
@@ -1663,12 +1802,14 @@ def init_db():
         ensure_column(connection, "products", "menu_group TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "products", "strain_type TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "tickets", "fulfillment_type TEXT NOT NULL DEFAULT 'DELIVERY'")
+        ensure_column(connection, "tickets", "payment_method TEXT NOT NULL DEFAULT 'CHIME'")
         ensure_column(connection, "tickets", "coupon_code TEXT")
         ensure_column(connection, "tickets", "discount_amount REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "credit_applied REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "delivery_block_id INTEGER")
 
         seed_leafly_strains(connection)
+        seed_payment_destinations(connection)
         seed_defaults(connection)
         seed_user_stats(connection)
         if not CLEANUP_DONE:
@@ -1790,8 +1931,6 @@ def render_nav(user, cart_count=0, eta_text=""):
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-admin-activity-widget">Activity</button>')
         if user["role"] in {"admin", "helpdesk"}:
             links.append('<a href="/admin">Admin</a>')
-        if eta_text:
-            links.append(f'<span class="menu-count eta-badge">{html.escape(eta_text)}</span>')
         links.append(f'<span class="nav-user">{html.escape(user["name"])} ({html.escape(ROLE_LABELS.get(user["role"], user["role"]))})</span>')
         links.append('<a class="button ghost" href="/logout">Logout</a>')
     else:
@@ -1816,13 +1955,6 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
       window.location.reload();
     }, 60000);
   </script>"""
-    nav_eta = ""
-    if user:
-        try:
-            with db_connection() as nav_connection:
-                nav_eta = eta_label(nav_connection)
-        except Exception:
-            nav_eta = ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1847,7 +1979,7 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
         </div>
       </a>
     </div>
-    <nav>{render_nav(user, cart_count=cart_count, eta_text=nav_eta)}</nav>
+    <nav>{render_nav(user, cart_count=cart_count, eta_text="")}</nav>
   </header>
   <main class="page-shell">
     {flash_message(message, level)}
@@ -2647,8 +2779,8 @@ def render_staff_activity_widget(connection, user):
     """
 
 
-def render_order_success_widget(message):
-    if message != "Order placed":
+def render_order_success_widget(message, ticket=None):
+    if message != "Order placed" or not ticket:
         return ""
     return """
     <div class="modal-shell" id="order-success-modal">
@@ -2660,12 +2792,13 @@ def render_order_success_widget(message):
             <h3>Your order was placed</h3>
           </div>
         </div>
+        __PAYMENT_INSTRUCTIONS__
         <div class="hero-actions">
           <a class="button" href="/dashboard">OK</a>
         </div>
       </div>
     </div>
-    """
+    """.replace("__PAYMENT_INSTRUCTIONS__", render_payment_instructions(ticket))
 
 
 def render_center_notice_widget(modal_id, eyebrow, title, body, button_text="OK", href="/dashboard"):
@@ -3077,6 +3210,95 @@ def render_payroll_widget(payroll, viewer_role):
           modal.classList.remove('is-hidden');
         }});
         modal.querySelectorAll('[data-close-payroll="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_payment_destination_widget(connection):
+    rows = payment_destination_rows(connection)
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["method"], []).append(row)
+    method_sections = []
+    for method in PAYMENT_METHOD_OPTIONS:
+        method_rows = grouped.get(method, [])
+        method_sections.append(
+            f"""
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <span class="eyebrow">Payment Method</span>
+                  <h3>{html.escape(payment_method_label(method))}</h3>
+                </div>
+              </div>
+              <div class="order-card-grid">
+                {''.join(
+                    f"""<form method='post' action='/payment-destinations/update' class='order-card action-stack'>
+                      <input type='hidden' name='destination_id' value='{row['id']}'>
+                      <label>Display Name<input type='text' name='display_name' value='{html.escape(row['display_name'])}' required></label>
+                      <label>Account Name<input type='text' name='account_name' value='{html.escape(row['account_name'])}' required></label>
+                      <label>Payment Link / Handle<input type='text' name='payment_link' value='{html.escape(row['payment_link'] or '')}' placeholder='URL, handle, or payment note'></label>
+                      <label>Sort Order<input type='number' name='sort_order' value='{row['sort_order']}'></label>
+                      <label>Status<select name='active'><option value='1' {'selected' if row['active'] else ''}>Active</option><option value='0' {'selected' if not row['active'] else ''}>Hidden</option></select></label>
+                      <button type='submit'>Save Destination</button>
+                    </form>"""
+                    for row in method_rows
+                ) or '<p>No destinations configured for this method yet.</p>'}
+              </div>
+              <form method="post" action="/payment-destinations/create" class="form-grid">
+                <input type="hidden" name="method" value="{method}">
+                <label>Display Name<input type="text" name="display_name" value="{html.escape(payment_method_label(method))}" required></label>
+                <label>Account Name<input type="text" name="account_name" required></label>
+                <label>Payment Link / Handle<input type="text" name="payment_link" placeholder="URL, handle, or payment note"></label>
+                <label>Sort Order<input type="number" name="sort_order" value="{len(method_rows) + 1}"></label>
+                <button type="submit">Add Destination</button>
+              </form>
+            </section>
+            """
+        )
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Payments</span>
+          <h2>Payment Destination Widget</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-payment-destination-widget">Open Payment Widget</button>
+      </div>
+      <p>Update the payment names, handles, and links shown to customers after they submit an order.</p>
+    </section>
+    <div class="modal-shell is-hidden" id="payment-destination-widget-modal">
+      <div class="modal-backdrop" data-close-payment-destination-widget="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Payments</span>
+            <h3>Customer Payment Destinations</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-payment-destination-widget="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(method_sections)}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-payment-destination-widget');
+        var modal = document.getElementById('payment-destination-widget-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-payment-destination-widget="yes"]').forEach(function (node) {{
           node.addEventListener('click', closeModal);
         }});
       }})();
@@ -3576,7 +3798,7 @@ def delivery_block_tickets_map(connection, block_ids):
     return grouped
 
 
-def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, coupon_code="", use_credits=False):
+def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, payment_method, coupon_code="", use_credits=False):
     ticket_number = generate_ticket_number(connection)
     timestamp = now_iso()
     client = connection.execute("SELECT * FROM users WHERE id = ?", (client_id,)).fetchone()
@@ -3602,19 +3824,23 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
     discount_amount = coupon_discount_amount(coupon, subtotal)
     available_credit = float(client["credit_balance"] or 0)
     credit_applied = round(min(max(0.0, available_credit), max(0.0, subtotal - discount_amount)), 2) if use_credits else 0.0
+    payment_method = (payment_method or "CHIME").upper()
+    if payment_method not in PAYMENT_METHOD_OPTIONS:
+        payment_method = "CHIME"
     payment_status = "VERIFIED" if subtotal - discount_amount - credit_applied <= 0 else "PENDING"
 
     connection.execute(
         """
         INSERT INTO tickets (
-            ticket_number, client_id, fulfillment_type, shipping_address, customer_note, status, payment_status,
+            ticket_number, client_id, fulfillment_type, payment_method, shipping_address, customer_note, status, payment_status,
             coupon_code, discount_amount, credit_applied, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?)
         """,
         (
             ticket_number,
             client_id,
             fulfillment_type,
+            payment_method,
             shipping_address,
             customer_note,
             payment_status,
@@ -3920,6 +4146,7 @@ def order_form(connection, product_id, user, error=""):
               <option value="PICKUP">Pick Up In Person</option>
             </select>
             </label>
+            {render_payment_method_input("payment_method", "CHIME")}
             {render_address_input("shipping_address", "single-order-address", "Required for delivery, optional for pickup")}
             <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
             <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
@@ -3938,6 +4165,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
     tickets = ticket_rows(connection, "WHERE tickets.client_id = ?", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    open_ticket = next((ticket for ticket in tickets if str(ticket["id"]) == str(open_ticket_id)), None)
     cards = []
     for index, ticket in enumerate(tickets):
         notes = ""
@@ -3965,6 +4193,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         detail_html = f"""
         <div class="order-meta">
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
@@ -3975,6 +4204,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Discount: {format_money(ticket["discount_amount"])}</span>
           <span>Credits Used: {format_money(ticket["credit_applied"])}</span>
         </div>
+        {render_payment_instructions(ticket)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {render_tracker(ticket["status"])}
@@ -4022,7 +4252,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         level=level,
         cart_count=client_cart_count(connection, user["id"]),
         auto_refresh=True,
-        extra_shell=render_client_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_order_success_widget(message),
+        extra_shell=render_client_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_order_success_widget(message, open_ticket),
     )
 
 
@@ -4128,8 +4358,10 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
         </div>
+        {render_payment_instructions(ticket)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         <div class="ticket-actions">{action}</div>
@@ -4430,7 +4662,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
 
 
 def render_picker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
-    tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED', 'READY_FOR_DISPATCH')", ())
+    tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED', 'READY_FOR_DISPATCH', 'READY_FOR_PICKUP')", ())
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     cards = []
@@ -4472,17 +4704,22 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Open board')}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
+          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
         </div>
+        {render_payment_instructions(ticket)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {f"<div class='tracker-note warning-note'>Review reason: {html.escape(ticket['review_reason'])}</div>" if ticket['review_reason'] else ""}
         {actions}
+        {f"<div class='ticket-actions'><form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='picker_verify_payment'><button type='submit'>Verify Pickup Payment</button></form></div>" if ticket['status'] == 'READY_FOR_PICKUP' and ticket['payment_status'] == 'PENDING' else ""}
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
         cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
+    {render_banker_verified_widget(message)}
     {render_picker_packed_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Ready to Pack</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'PACKING')}</strong></div>
@@ -4528,8 +4765,11 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
           <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
+          <span>Payment: {html.escape(ticket["payment_status"])}</span>
+          <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
         </div>
+        {render_payment_instructions(ticket)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
         {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
@@ -4539,6 +4779,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
             <input type="hidden" name="action" value="{action}">
             <button type="submit">{button}</button>
           </form>
+          {f"<form method='post' action='/orders/update' class='action-stack'><input type='hidden' name='order_id' value='{ticket['id']}'><input type='hidden' name='action' value='driver_verify_payment'><button type='submit'>Verify Cash Payment</button></form>" if ticket['payment_status'] == 'PENDING' and ticket['payment_method'] == 'CASH' and ticket['fulfillment_type'] == 'DELIVERY' else ""}
           {render_driver_emergency_widget(ticket, index)}
         </div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
@@ -4578,6 +4819,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
+    {render_banker_verified_widget(message)}
     {render_payment_block_widget(message)}
     {render_driver_action_widget(message)}
     <section class="stats-row">
@@ -4743,6 +4985,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       {render_admin_creation_widgets(leafly_strains, coupons)}
       {render_credit_issue_panel(connection)}
     </section>
+    {render_payment_destination_widget(connection)}
     <section class="panel">
       <h2>Latest Budhub Tickets</h2>
       <table>
@@ -5087,6 +5330,82 @@ def handle_issue_credit(environ, start_response, connection, user):
     return redirect(start_response, f"{destination}?message=Credits issued")
 
 
+def handle_create_payment_destination(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    method = (data.get("method", "") or "").upper()
+    if method not in PAYMENT_METHOD_OPTIONS:
+        return redirect(start_response, "/admin?message=Payment method is not valid")
+    display_name = data.get("display_name", "").strip() or payment_method_label(method)
+    account_name = data.get("account_name", "").strip()
+    payment_link = data.get("payment_link", "").strip()
+    sort_order_raw = data.get("sort_order", "").strip()
+    if not account_name:
+        return redirect(start_response, "/admin?message=Account name is required")
+    try:
+        sort_order = int(sort_order_raw or "0")
+    except ValueError:
+        return redirect(start_response, "/admin?message=Sort order must be a number")
+    connection.execute(
+        """
+        INSERT INTO payment_destinations (
+            method, display_name, account_name, payment_link, sort_order, active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        (method, display_name, account_name, payment_link, sort_order, now_iso(), now_iso()),
+    )
+    log_activity(
+        connection,
+        user,
+        "CREATE_PAYMENT_DESTINATION",
+        f"Added payment destination {account_name} for {payment_method_label(method)}.",
+    )
+    connection.commit()
+    return redirect(start_response, "/admin?message=Payment destination created")
+
+
+def handle_update_payment_destination(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    try:
+        destination_id = int(data.get("destination_id", "0"))
+    except ValueError:
+        return redirect(start_response, "/admin?message=Payment destination not found")
+    destination = connection.execute("SELECT * FROM payment_destinations WHERE id = ?", (destination_id,)).fetchone()
+    if not destination:
+        return redirect(start_response, "/admin?message=Payment destination not found")
+    display_name = data.get("display_name", "").strip() or destination["display_name"]
+    account_name = data.get("account_name", "").strip()
+    payment_link = data.get("payment_link", "").strip()
+    active = 1 if data.get("active", "1") == "1" else 0
+    if not account_name:
+        return redirect(start_response, "/admin?message=Account name is required")
+    try:
+        sort_order = int((data.get("sort_order", "") or str(destination["sort_order"])).strip())
+    except ValueError:
+        return redirect(start_response, "/admin?message=Sort order must be a number")
+    connection.execute(
+        """
+        UPDATE payment_destinations
+        SET display_name = ?, account_name = ?, payment_link = ?, sort_order = ?, active = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (display_name, account_name, payment_link, sort_order, active, now_iso(), destination_id),
+    )
+    log_activity(
+        connection,
+        user,
+        "UPDATE_PAYMENT_DESTINATION",
+        f"Updated payment destination {account_name} for {payment_method_label(destination['method'])}.",
+    )
+    connection.commit()
+    return redirect(start_response, "/admin?message=Payment destination updated")
+
+
 def handle_create_user(environ, start_response, connection, user):
     gate = require_role(start_response, user, {"admin", "helpdesk"})
     if gate:
@@ -5239,6 +5558,7 @@ def handle_create_order(environ, start_response, connection, user):
         return gate
     data = read_post_data(environ)
     fulfillment_type = data.get("fulfillment_type", "DELIVERY")
+    payment_method = data.get("payment_method", "CHIME")
     shipping_address = data.get("shipping_address", "").strip()
     if fulfillment_type == "DELIVERY" and not shipping_address:
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "Delivery address is required for delivery orders."))
@@ -5252,6 +5572,7 @@ def handle_create_order(environ, start_response, connection, user):
             shipping_address,
             data.get("customer_note", "").strip(),
             fulfillment_type,
+            payment_method,
             data.get("coupon_code", ""),
             data.get("use_credits") == "yes",
         )
@@ -5259,7 +5580,7 @@ def handle_create_order(environ, start_response, connection, user):
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, str(exc)))
     log_activity(connection, user, "CREATE_ORDER", f"Created order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
-    return redirect(start_response, "/dashboard?message=Order placed")
+    return redirect(start_response, f"/dashboard?message=Order placed&open_ticket={ticket_id}")
 
 
 def handle_cart_checkout(environ, start_response, connection, user):
@@ -5272,6 +5593,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
     if not items:
         return redirect_with_message(start_response, return_to, "Your bag is empty")
     fulfillment_type = data.get("fulfillment_type", "DELIVERY")
+    payment_method = data.get("payment_method", "CHIME")
     shipping_address = data.get("shipping_address", "").strip()
     if fulfillment_type == "DELIVERY" and not shipping_address:
         return redirect_with_message(start_response, return_to, "Delivery address is required")
@@ -5285,6 +5607,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
             shipping_address,
             data.get("customer_note", "").strip(),
             fulfillment_type,
+            payment_method,
             data.get("coupon_code", ""),
             data.get("use_credits") == "yes",
         )
@@ -5293,7 +5616,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
     connection.execute("DELETE FROM cart_items WHERE user_id = ?", (user["id"],))
     log_activity(connection, user, "CHECKOUT_BAG", f"Created order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
-    return redirect(start_response, "/dashboard?message=Order placed")
+    return redirect(start_response, f"/dashboard?message=Order placed&open_ticket={ticket_id}")
 
 
 def handle_order_chat(environ, start_response, connection, user):
@@ -5305,6 +5628,8 @@ def handle_order_chat(environ, start_response, connection, user):
     ticket = single_ticket(connection, ticket_id)
     if not ticket or not user_can_access_ticket(user, ticket):
         return redirect(start_response, "/dashboard?message=Order not found")
+    if ticket["status"] == "DELIVERED":
+        return redirect(start_response, f"/dashboard?message=Messaging is closed for completed tickets&open_ticket={ticket_id}")
     message = data.get("message", "").strip()
     if not message:
         return redirect(start_response, "/dashboard?message=Message is required")
@@ -5354,6 +5679,11 @@ def handle_update_order(environ, start_response, connection, user):
         return redirect(start_response, "/dashboard?message=That customer action is not allowed")
 
     if user["role"] == "picker":
+        if action == "picker_verify_payment" and ticket["status"] == "READY_FOR_PICKUP" and ticket["payment_status"] == "PENDING":
+            update_ticket(connection, ticket_id, payment_status="VERIFIED", picker_id=user["id"], internal_note="Pickup payment verified by picker.")
+            log_activity(connection, user, "PICKER_VERIFY_PAYMENT", f"Verified pickup payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Payment verified")
         if action == "pack_order" and ticket["status"] == "PACKING":
             next_status = "READY_FOR_PICKUP" if ticket["fulfillment_type"] == "PICKUP" else "READY_FOR_DISPATCH"
             update_ticket(connection, ticket_id, status=next_status, picker_id=user["id"], review_reason=None)
@@ -5514,6 +5844,11 @@ def handle_update_order(environ, start_response, connection, user):
     if user["role"] == "driver":
         if ticket["driver_id"] != user["id"]:
             return redirect(start_response, "/dashboard?message=That route is not assigned to you")
+        if action == "driver_verify_payment" and ticket["payment_status"] == "PENDING" and ticket["payment_method"] == "CASH" and ticket["fulfillment_type"] == "DELIVERY" and ticket["status"] in {"DRIVER_ASSIGNED", "OUT_FOR_DELIVERY"}:
+            update_ticket(connection, ticket_id, payment_status="VERIFIED", driver_id=user["id"], internal_note="Cash delivery payment verified by driver.")
+            log_activity(connection, user, "DRIVER_VERIFY_PAYMENT", f"Verified cash delivery payment for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Payment verified")
         if action == "driver_emergency":
             emergency_type = data.get("emergency_type", "")
             meta = emergency_meta(emergency_type)
@@ -5928,6 +6263,10 @@ def application(environ, start_response):
             return handle_delete_coupon(environ, start_response, connection, user)
         if path == "/credits/issue" and method == "POST":
             return handle_issue_credit(environ, start_response, connection, user)
+        if path == "/payment-destinations/create" and method == "POST":
+            return handle_create_payment_destination(environ, start_response, connection, user)
+        if path == "/payment-destinations/update" and method == "POST":
+            return handle_update_payment_destination(environ, start_response, connection, user)
         if path == "/users/create" and method == "POST":
             return handle_create_user(environ, start_response, connection, user)
         if path == "/users/update" and method == "POST":
