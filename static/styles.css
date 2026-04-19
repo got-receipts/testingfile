@@ -346,6 +346,12 @@ nav {
   max-height: calc(100vh - 7rem);
   overflow: auto;
   padding-right: 0.35rem;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.store-main::-webkit-scrollbar {
+  display: none;
 }
 
 .menu-section-head {
@@ -654,6 +660,12 @@ nav {
   align-self: start;
   max-height: calc(100vh - 7rem);
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.cart-widget::-webkit-scrollbar {
+  display: none;
 }
 
 .bag-head,
@@ -923,6 +935,12 @@ button:disabled {
   margin-bottom: 1rem;
   max-height: 280px;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.chat-thread::-webkit-scrollbar {
+  display: none;
 }
 
 .chat-message {

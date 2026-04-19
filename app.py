@@ -1575,7 +1575,32 @@ def render_help_button(user):
     return '<a class="support-fab" href="/register#support-access">Need Help?</a>'
 
 
-def render_nav(user, cart_count=0):
+def average_delivery_eta_minutes(connection, modifier="-1 day"):
+    row = connection.execute(
+        """
+        SELECT COALESCE(AVG((julianday(updated_at) - julianday(created_at)) * 24 * 60), 0) AS avg_minutes
+        FROM tickets
+        WHERE status = 'DELIVERED' AND updated_at >= datetime('now', ?)
+        """,
+        (modifier,),
+    ).fetchone()
+    return float((row["avg_minutes"] if row else 0) or 0)
+
+
+def eta_label(connection):
+    avg_minutes = average_delivery_eta_minutes(connection)
+    if avg_minutes <= 0:
+        return "ETA Today: Live"
+    if avg_minutes >= 60:
+        hours = int(avg_minutes // 60)
+        minutes = int(round(avg_minutes % 60))
+        if minutes == 0:
+            return f"ETA Today: {hours}h"
+        return f"ETA Today: {hours}h {minutes}m"
+    return f"ETA Today: {int(round(avg_minutes))}m"
+
+
+def render_nav(user, cart_count=0, eta_text=""):
     links = ['<a href="/">Menu</a>']
     if user:
         links.append('<a href="/dashboard">Dashboard</a>')
@@ -1588,6 +1613,8 @@ def render_nav(user, cart_count=0):
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-admin-activity-widget">Activity</button>')
         if user["role"] in {"admin", "helpdesk"}:
             links.append('<a href="/admin">Admin</a>')
+        if eta_text:
+            links.append(f'<span class="menu-count eta-badge">{html.escape(eta_text)}</span>')
         links.append(f'<span class="nav-user">{html.escape(user["name"])} ({html.escape(ROLE_LABELS.get(user["role"], user["role"]))})</span>')
         links.append('<a class="button ghost" href="/logout">Logout</a>')
     else:
@@ -1609,6 +1636,13 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
       window.location.reload();
     }, 30000);
   </script>"""
+    nav_eta = ""
+    if user:
+        try:
+            with db_connection() as nav_connection:
+                nav_eta = eta_label(nav_connection)
+        except Exception:
+            nav_eta = ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1633,7 +1667,7 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
         </div>
       </a>
     </div>
-    <nav>{render_nav(user, cart_count=cart_count)}</nav>
+    <nav>{render_nav(user, cart_count=cart_count, eta_text=nav_eta)}</nav>
   </header>
   <main class="page-shell">
     {flash_message(message, level)}
@@ -2430,6 +2464,28 @@ def render_staff_activity_widget(connection, user):
     """
 
 
+def render_order_success_widget(message):
+    if message != "Order placed":
+        return ""
+    return """
+    <div class="modal-shell" id="order-success-modal">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Order Confirmed</span>
+            <h3>Your order was placed</h3>
+          </div>
+        </div>
+        <p>Your order is in the system and has been sent into the workflow.</p>
+        <div class="hero-actions">
+          <a class="button" href="/dashboard">OK</a>
+        </div>
+      </div>
+    </div>
+    """
+
+
 def render_account_recovery_widget(users, viewer_role):
     title = "Engineer Account Recovery" if viewer_role == "helpdesk" else "Admin Account Recovery"
     allowed_accounts = [account for account in users if account["role"] != "helpdesk"]
@@ -2503,6 +2559,16 @@ def render_account_recovery_widget(users, viewer_role):
 
 def render_account_management_widget(users, user_stats, viewer_role):
     title = "Engineer Account Manager" if viewer_role == "helpdesk" else "Admin Account Manager"
+    role_options = [
+        ("client", "Customer"),
+        ("banker", "In-House Bank"),
+        ("dispatcher", "Dispatch Lead"),
+        ("picker", "Inventory Picker"),
+        ("driver", "Driver"),
+        ("admin", "Admin"),
+    ]
+    if viewer_role == "helpdesk":
+        role_options.append(("helpdesk", "Budhub Helpdesk"))
     return f"""
     <section class="panel">
       <div class="panel-head">
@@ -2540,6 +2606,7 @@ def render_account_management_widget(users, user_stats, viewer_role):
                   <summary>Profile Actions</summary>
                   <form method='post' action='/users/update' class='action-stack'>
                     <input type='hidden' name='user_id' value='{account['id']}'>
+                    <label>Dashboard Role<select name='role'>{''.join(f"<option value='{value}' {'selected' if account['role'] == value else ''}>{html.escape(label)}</option>" for value, label in role_options)}</select></label>
                     <label>Account Action<select name='account_state'><option value='ACTIVE'>Active</option><option value='LOCKED'>Lock</option><option value='SUSPENDED'>Suspend</option><option value='BANNED'>Ban</option></select></label>
                     <label>Reason<textarea name='reason' required placeholder='Reason for account state change'></textarea></label>
                     <button type='submit'>Update Account</button>
@@ -3033,7 +3100,7 @@ def render_order_chat(ticket, user, message_rows):
     """
 
 
-def render_ticket_modal(modal_id, title, summary_html, detail_html):
+def render_ticket_modal(modal_id, title, summary_html, detail_html, ticket_id=""):
     return f"""
     <article class="order-card">
       {summary_html}
@@ -3041,7 +3108,7 @@ def render_ticket_modal(modal_id, title, summary_html, detail_html):
         <button type="button" class="button chat-launch" data-open-ticket-modal="{html.escape(modal_id)}">Open Order</button>
       </div>
     </article>
-    <div class="modal-shell is-hidden" id="{html.escape(modal_id)}">
+    <div class="modal-shell is-hidden" id="{html.escape(modal_id)}" data-ticket-id="{html.escape(str(ticket_id))}">
       <div class="modal-backdrop" data-close-ticket-modal="{html.escape(modal_id)}"></div>
       <div class="modal-card modal-card-wide">
         <div class="panel-head">
@@ -3057,7 +3124,8 @@ def render_ticket_modal(modal_id, title, summary_html, detail_html):
     """
 
 
-def render_ticket_modal_script():
+def render_ticket_modal_script(open_ticket_id=None):
+    auto_open = f"'{open_ticket_id}'" if open_ticket_id else "''"
     return """
     <script>
       (function () {
@@ -3077,9 +3145,16 @@ def render_ticket_modal_script():
             }
           });
         });
+        var openTicketId = __OPEN_TICKET_ID__;
+        if (openTicketId) {
+          var targetModal = document.querySelector('[data-ticket-id="' + openTicketId + '"]');
+          if (targetModal) {
+            targetModal.classList.remove('is-hidden');
+          }
+        }
       })();
     </script>
-    """
+    """.replace("__OPEN_TICKET_ID__", auto_open)
 
 
 def create_delivery_block(connection, dispatcher_id):
@@ -3492,7 +3567,7 @@ def order_form(connection, product_id, user, error=""):
     )
 
 
-def render_client_dashboard(connection, user, message=None, level="info"):
+def render_client_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(connection, "WHERE tickets.client_id = ?", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
@@ -3552,7 +3627,7 @@ def render_client_dashboard(connection, user, message=None, level="info"):
         </div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
-        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     latest = STATUS_LABELS.get(tickets[0]["status"], tickets[0]["status"]) if tickets else "No Orders"
     body = f"""
     <section class="stats-row">
@@ -3580,7 +3655,7 @@ def render_client_dashboard(connection, user, message=None, level="info"):
         level=level,
         cart_count=client_cart_count(connection, user["id"]),
         auto_refresh=True,
-        extra_shell=render_client_activity_widget(connection, user) + render_ticket_modal_script(),
+        extra_shell=render_client_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_order_success_widget(message),
     )
 
 
@@ -3644,7 +3719,7 @@ def render_cart_page(connection, user, message=None, level="info"):
     return page("Your Bag", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]), extra_shell=render_client_activity_widget(connection, user))
 
 
-def render_banker_dashboard(connection, user, message=None, level="info"):
+def render_banker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(
         connection,
         "WHERE tickets.payment_status = 'PENDING' AND tickets.status NOT IN ('CANCELED', 'DELIVERED') OR tickets.banker_id = ?",
@@ -3693,7 +3768,7 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
         <div class="ticket-actions">{action}</div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
-        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
@@ -3705,10 +3780,10 @@ def render_banker_dashboard(connection, user, message=None, level="info"):
     {render_credit_issue_panel(connection)}
     {render_activity_list(connection, user["id"], title="Your Banking Activity")}
     """
-    return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
+    return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
 
 
-def render_dispatcher_dashboard(connection, user, message=None, level="info"):
+def render_dispatcher_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(connection, "", ())
     emergency_alerts = support_rows(connection, "WHERE support_tickets.category LIKE 'EMERGENCY_%' AND support_tickets.status != 'CLOSED'", ())
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
@@ -3733,27 +3808,62 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
                 """
             )
         if ticket["status"] == "READY_FOR_DISPATCH":
+            if ticket["delivery_block_id"]:
+                actions.append(f"<div class='tracker-note'>This ticket is already in block {html.escape(ticket['delivery_block_name'] or 'Assigned')}.</div>")
+                available_change_blocks = [block for block in open_blocks if block["id"] != ticket["delivery_block_id"]]
+                change_block_options = "".join(f"<option value='{block['id']}'>{html.escape(block['block_name'])} ({block['active_ticket_count']}/{BLOCK_SIZE})</option>" for block in available_change_blocks)
+                actions.append(
+                    f"""
+                    <form method="post" action="/orders/update" class="action-stack">
+                      <input type="hidden" name="order_id" value="{ticket["id"]}">
+                      <input type="hidden" name="action" value="change_block">
+                      <label>Move to Another Block
+                        <select name="block_id" required>
+                          <option value="">Choose open block</option>
+                          {change_block_options}
+                        </select>
+                      </label>
+                      <button type="submit" {'disabled' if not available_change_blocks else ''}>Change Block</button>
+                    </form>
+                    """
+                )
+            else:
+                actions.append(
+                    f"""
+                    <form method="post" action="/orders/update" class="action-stack">
+                      <input type="hidden" name="order_id" value="{ticket["id"]}">
+                      <input type="hidden" name="action" value="assign_to_block">
+                      <label>Assign to Block
+                        <select name="block_id" required>
+                          <option value="">Choose open block</option>
+                          {block_options}
+                        </select>
+                      </label>
+                      <button type="submit" {'disabled' if not open_blocks else ''}>Assign Ticket to Block</button>
+                    </form>
+                    """
+                )
+                actions.append(
+                    f"""
+                    <form method="post" action="/orders/update" class="action-stack">
+                      <input type="hidden" name="order_id" value="{ticket["id"]}">
+                      <input type="hidden" name="action" value="create_block_for_ticket">
+                      <button type="submit">Create New Block and Add Ticket</button>
+                    </form>
+                    """
+                )
             actions.append(
                 f"""
                 <form method="post" action="/orders/update" class="action-stack">
                   <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="assign_to_block">
-                  <label>Assign to Block
-                    <select name="block_id" required>
-                      <option value="">Choose open block</option>
-                      {block_options}
+                  <input type="hidden" name="action" value="assign_direct_driver">
+                  <label>Send Direct to Driver
+                    <select name="driver_id" required>
+                      <option value="">Choose driver</option>
+                      {driver_options}
                     </select>
                   </label>
-                  <button type="submit" {'disabled' if not open_blocks else ''}>Assign Ticket to Block</button>
-                </form>
-                """
-            )
-            actions.append(
-                f"""
-                <form method="post" action="/orders/update" class="action-stack">
-                  <input type="hidden" name="order_id" value="{ticket["id"]}">
-                  <input type="hidden" name="action" value="create_block_for_ticket">
-                  <button type="submit">Create New Block and Add Ticket</button>
+                  <button type="submit">Send Direct to Driver</button>
                 </form>
                 """
             )
@@ -3831,7 +3941,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
         <div class="ticket-actions">{''.join(actions) if actions else "<span class='subtle'>No dispatch action needed.</span>"}</div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
-        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     block_cards = []
     for block in blocks:
         block_tickets = block_ticket_map.get(block["id"], [])
@@ -3912,10 +4022,10 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info"):
     {render_credit_issue_panel(connection)}
     {render_activity_list(connection, user["id"], title="Your Dispatch Activity")}
     """
-    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
+    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
 
 
-def render_picker_dashboard(connection, user, message=None, level="info"):
+def render_picker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(connection, "WHERE tickets.status IN ('PACKING', 'REVIEW_REQUIRED', 'READY_FOR_DISPATCH')", ())
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
@@ -3965,7 +4075,7 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
         {actions}
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
-        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
@@ -3975,10 +4085,10 @@ def render_picker_dashboard(connection, user, message=None, level="info"):
     </section>
     <section class="panel"><h2>Packing Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No packing work waiting.</p>'}</div></section>
     """
-    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
+    return page("Picker Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
 
 
-def render_driver_dashboard(connection, user, message=None, level="info"):
+def render_driver_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(connection, "WHERE tickets.driver_id = ? AND tickets.status IN ('DRIVER_ASSIGNED', 'OUT_FOR_DELIVERY')", (user["id"],))
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
@@ -4050,7 +4160,7 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
         </div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
-        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html))
+        cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
@@ -4061,12 +4171,13 @@ def render_driver_dashboard(connection, user, message=None, level="info"):
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
     """
-    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script())
+    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
 
 
 def render_admin_home(connection, user, message=None, level="info"):
     title = "Engineer Dashboard" if user["role"] == "helpdesk" else "Admin Dashboard"
     finance = finance_snapshot(connection)
+    avg_eta = eta_label(connection)
     body = f"""
     <section class="stats-row">
       <div class="stat-card"><span>Total Accounts</span><strong>{connection.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]}</strong></div>
@@ -4076,6 +4187,7 @@ def render_admin_home(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
       <div class="stat-card"><span>Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
       <div class="stat-card"><span>Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
+      <div class="stat-card"><span>Average ETA Today</span><strong>{html.escape(avg_eta.replace('ETA Today: ', ''))}</strong></div>
     </section>
     <section class="admin-grid">
       <section class="panel">
@@ -4102,6 +4214,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     finance = finance_snapshot(connection)
     payroll = payroll_snapshot(connection, users, user_stats)
     order_chat_logs = recent_order_messages(connection)
+    avg_eta = eta_label(connection)
     verification_queue = connection.execute(
         """
         SELECT * FROM users
@@ -4185,6 +4298,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       <div class="stat-card"><span>Sales Today</span><strong>{format_money(finance["day"])}</strong></div>
       <div class="stat-card"><span>Sales This Week</span><strong>{format_money(finance["week"])}</strong></div>
       <div class="stat-card"><span>Sales This Month</span><strong>{format_money(finance["month"])}</strong></div>
+      <div class="stat-card"><span>Average ETA Today</span><strong>{html.escape(avg_eta.replace('ETA Today: ', ''))}</strong></div>
       {engineer_stats}
     </section>
     <section class="panel">
@@ -4315,19 +4429,19 @@ def render_helpdesk_dashboard(connection, user, message=None, level="info"):
     return page("Budhub Help", body, user=user, message=message, level=level, auto_refresh=True)
 
 
-def render_dashboard(connection, user, message=None, level="info"):
+def render_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     if user["role"] == "client":
-        return render_client_dashboard(connection, user, message, level)
+        return render_client_dashboard(connection, user, message, level, open_ticket_id)
     if user["role"] == "helpdesk":
         return render_helpdesk_dashboard(connection, user, message, level)
     if user["role"] == "banker":
-        return render_banker_dashboard(connection, user, message, level)
+        return render_banker_dashboard(connection, user, message, level, open_ticket_id)
     if user["role"] == "dispatcher":
-        return render_dispatcher_dashboard(connection, user, message, level)
+        return render_dispatcher_dashboard(connection, user, message, level, open_ticket_id)
     if user["role"] == "picker":
-        return render_picker_dashboard(connection, user, message, level)
+        return render_picker_dashboard(connection, user, message, level, open_ticket_id)
     if user["role"] == "driver":
-        return render_driver_dashboard(connection, user, message, level)
+        return render_driver_dashboard(connection, user, message, level, open_ticket_id)
     if user["role"] == "admin":
         return render_admin_home(connection, user, message, level)
     return page("Dashboard", "<section class='panel'><p>Unknown role.</p></section>", user=user)
@@ -4751,7 +4865,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
     connection.execute("DELETE FROM cart_items WHERE user_id = ?", (user["id"],))
     log_activity(connection, user, "CHECKOUT_BAG", f"Created order ticket #{ticket_id}.", target_user_id=user["id"])
     connection.commit()
-    return redirect_with_message(start_response, return_to, f"Order #{ticket_id} created")
+    return redirect(start_response, "/dashboard?message=Order placed")
 
 
 def handle_order_chat(environ, start_response, connection, user):
@@ -4772,7 +4886,7 @@ def handle_order_chat(environ, start_response, connection, user):
     )
     log_activity(connection, user, "ORDER_CHAT_MESSAGE", f"Added a chat message to ticket {ticket['ticket_number']}.", target_user_id=ticket["client_id"])
     connection.commit()
-    return redirect(start_response, "/dashboard?message=Order message sent")
+    return redirect(start_response, f"/dashboard?message=Order message sent&open_ticket={ticket_id}")
 
 
 def handle_update_order(environ, start_response, connection, user):
@@ -4839,12 +4953,16 @@ def handle_update_order(environ, start_response, connection, user):
             connection.commit()
             return redirect(start_response, "/dashboard?message=Pickup completed")
         if action == "create_block_for_ticket" and ticket["status"] == "READY_FOR_DISPATCH":
+            if ticket["delivery_block_id"]:
+                return redirect(start_response, "/dashboard?message=This ticket is already assigned to a block")
             block_id = create_delivery_block(connection, user["id"])
             update_ticket(connection, ticket_id, delivery_block_id=block_id, dispatcher_id=user["id"], internal_note=f"Assigned to block {connection.execute('SELECT block_name FROM delivery_blocks WHERE id = ?', (block_id,)).fetchone()['block_name']}")
             refresh_delivery_block_status(connection, block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket added to new block")
         if action == "assign_to_block" and ticket["status"] == "READY_FOR_DISPATCH":
+            if ticket["delivery_block_id"]:
+                return redirect(start_response, "/dashboard?message=This ticket is already assigned to a block")
             block_id = int(data.get("block_id", "0"))
             block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
             if not block or block["status"] != "OPEN":
@@ -4859,6 +4977,38 @@ def handle_update_order(environ, start_response, connection, user):
             refresh_delivery_block_status(connection, block_id)
             connection.commit()
             return redirect(start_response, "/dashboard?message=Ticket assigned to block")
+        if action == "change_block" and ticket["status"] == "READY_FOR_DISPATCH":
+            if not ticket["delivery_block_id"]:
+                return redirect(start_response, "/dashboard?message=This ticket is not currently assigned to a block")
+            block_id = int(data.get("block_id", "0"))
+            block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
+            if not block or block["status"] != "OPEN":
+                return redirect(start_response, "/dashboard?message=Choose a valid open block")
+            if block["id"] == ticket["delivery_block_id"]:
+                return redirect(start_response, "/dashboard?message=This ticket is already in that block")
+            block_ticket_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM tickets WHERE delivery_block_id = ? AND status NOT IN ('CANCELED', 'DELIVERED')",
+                (block_id,),
+            ).fetchone()["count"]
+            if block_ticket_count >= BLOCK_SIZE:
+                return redirect(start_response, f"/dashboard?message=That block already has {BLOCK_SIZE} tickets")
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, delivery_block_id=block_id, dispatcher_id=user["id"], internal_note=f"Moved to block {block['block_name']}")
+            refresh_delivery_block_status(connection, prior_block_id)
+            refresh_delivery_block_status(connection, block_id)
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket moved to a different block")
+        if action == "assign_direct_driver" and ticket["status"] == "READY_FOR_DISPATCH":
+            driver = connection.execute("SELECT * FROM users WHERE id = ? AND role = 'driver'", (int(data.get("driver_id", "0")),)).fetchone()
+            if not driver:
+                return redirect(start_response, "/dashboard?message=Choose a valid driver")
+            prior_block_id = ticket["delivery_block_id"]
+            update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], delivery_block_id=None, internal_note=f"Sent directly to driver {driver['name']}.")
+            refresh_delivery_block_status(connection, prior_block_id)
+            increment_user_stat(connection, user["id"], "total_orders_dispatched", 1)
+            log_activity(connection, user, "DIRECT_ASSIGN_DRIVER", f"Sent ticket #{ticket['ticket_number']} directly to driver {driver['name']}.", target_user_id=ticket["client_id"])
+            connection.commit()
+            return redirect(start_response, "/dashboard?message=Ticket sent directly to driver")
         if action == "submit_block" and ticket["status"] == "READY_FOR_DISPATCH":
             block_id = int(data.get("block_id", "0"))
             block = connection.execute("SELECT * FROM delivery_blocks WHERE id = ?", (block_id,)).fetchone()
@@ -4987,13 +5137,21 @@ def handle_update_user_account(environ, start_response, connection, user):
         return redirect(start_response, "/admin?message=Account not found")
     if target["role"] == "admin":
         return redirect(start_response, "/admin?message=Admin accounts cannot be changed here")
+    new_role = data.get("role", target["role"]).strip() or target["role"]
+    allowed_roles = {"client", "banker", "dispatcher", "picker", "driver", "admin"}
+    if user["role"] == "helpdesk":
+        allowed_roles.add("helpdesk")
+    if new_role not in allowed_roles:
+        return redirect(start_response, "/admin?message=That role change is not allowed")
+    if new_role == "helpdesk" and user["role"] != "helpdesk":
+        return redirect(start_response, "/admin?message=Only engineers can assign the engineer role")
     account_state = data.get("account_state", "ACTIVE")
     reason = data.get("reason", "").strip()
     if not reason:
         return redirect(start_response, "/admin?message=Reason is required")
     connection.execute(
-        "UPDATE users SET account_state = ?, account_reason = ? WHERE id = ?",
-        (account_state, reason, target_id),
+        "UPDATE users SET role = ?, account_state = ?, account_reason = ? WHERE id = ?",
+        (new_role, account_state, reason, target_id),
     )
     if account_state in {"LOCKED", "SUSPENDED", "BANNED"}:
         connection.execute(
@@ -5003,7 +5161,7 @@ def handle_update_user_account(environ, start_response, connection, user):
             """,
             (target_id, user["id"], account_state, reason, now_iso(), now_iso()),
         )
-    log_activity(connection, user, "UPDATE_ACCOUNT_STATE", f"Set account state to {account_state} for {target['email']}. Reason: {reason}", target_user_id=target_id)
+    log_activity(connection, user, "UPDATE_ACCOUNT_STATE", f"Set role to {new_role} and account state to {account_state} for {target['email']}. Reason: {reason}", target_user_id=target_id)
     connection.commit()
     message = "Account updated and support ticket created" if account_state in {"LOCKED", "SUSPENDED", "BANNED"} else "Account returned to active status"
     return redirect(start_response, f"/admin?message={message}")
@@ -5294,7 +5452,7 @@ def application(environ, start_response):
                 return gate
             if account_restricted(user):
                 return text_response(start_response, restricted_account_page(user),)
-            return text_response(start_response, render_dashboard(connection, user, message=message))
+            return text_response(start_response, render_dashboard(connection, user, message=message, open_ticket_id=params.get("open_ticket")))
         if path == "/help":
             gate = require_user(start_response, user)
             return gate or text_response(start_response, render_helpdesk_dashboard(connection, user, message=message))
