@@ -465,6 +465,12 @@ nav {
   background: #262626;
 }
 
+.product-card-image-fallback {
+  object-fit: contain;
+  padding: 1.25rem;
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.16)), #171717;
+}
+
 .product-card-top h3 {
   margin: 0.35rem 0 0.5rem;
   font-size: 1.35rem;

@@ -1067,6 +1067,18 @@ def placeholder_product_image_response(start_response):
     return [content]
 
 
+def is_valid_image_payload(content_type, content):
+    normalized_type = (content_type or "").lower()
+    if not normalized_type.startswith("image/"):
+        return False
+    if not content:
+        return False
+    lowered_prefix = content[:256].lower()
+    if lowered_prefix.startswith(b"<!doctype html") or lowered_prefix.startswith(b"<html") or b"<body" in lowered_prefix:
+        return False
+    return True
+
+
 def is_leafly_default_image(image_url):
     if not image_url:
         return True
@@ -1128,8 +1140,14 @@ def serve_product_image(environ, start_response):
         with open(cached_path, "rb") as handle:
             content = handle.read()
         content_type = mimetypes.guess_type(cached_path)[0] or "image/jpeg"
-        start_response("200 OK", [("Content-Type", content_type), ("Cache-Control", "public, max-age=86400")])
-        return [content]
+        if not is_valid_image_payload(content_type, content):
+            try:
+                os.remove(cached_path)
+            except OSError:
+                pass
+        else:
+            start_response("200 OK", [("Content-Type", content_type), ("Cache-Control", "public, max-age=86400")])
+            return [content]
 
     try:
         request = Request(
@@ -1143,7 +1161,9 @@ def serve_product_image(environ, start_response):
         with urlopen(request, timeout=12) as response:
             content = response.read()
             content_type = response.headers.get_content_type() or "image/jpeg"
-    except (HTTPError, URLError, TimeoutError, ValueError):
+    except (HTTPError, URLError, TimeoutError, ValueError, OSError):
+        return placeholder_product_image_response(start_response)
+    if not is_valid_image_payload(content_type, content):
         return placeholder_product_image_response(start_response)
 
     extension = mimetypes.guess_extension(content_type) or os.path.splitext(parsed.path)[1] or ".jpg"
@@ -3600,7 +3620,7 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         cards.append(
             f"""
             <article class="product-card{' is-hidden' if not matches_filters else ''}" data-category="{html.escape(product['category'])}" data-strain="{html.escape(product_strain)}" data-name="{html.escape(str(product['name']).lower())}">
-              <img class="product-card-image" src="{html.escape(product_image_proxy_url(product['image_url'], product['source_url'] or ''))}" alt="{html.escape(product['name'])}" loading="lazy">
+              <img class="product-card-image" src="{html.escape(product_image_proxy_url(product['image_url'], product['source_url'] or ''))}" alt="{html.escape(product['name'])}" loading="lazy" onerror="this.onerror=null;this.src='/static/budhub-logo.png';this.classList.add('product-card-image-fallback');">
               <div class="product-card-top">
                 <span class="eyebrow">{html.escape(card_label)} | In Stock: {product["stock"]}</span>
                 <h3>{html.escape(product["name"])}</h3>
