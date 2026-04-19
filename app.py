@@ -3545,9 +3545,9 @@ def render_payment_destination_widget(connection):
       <div class="panel-head">
         <div>
           <span class="eyebrow">Payments</span>
-          <h2>Payment Destination Widget</h2>
+          <h2>Payment Destination Center</h2>
         </div>
-        <button type="button" class="button ghost" id="open-payment-destination-widget">Open Payment Widget</button>
+        <button type="button" class="button ghost" id="open-payment-destination-widget">Open Payment Center</button>
       </div>
       <p>Update the payment names, handles, and links shown to customers after they submit an order.</p>
     </section>
@@ -3587,18 +3587,19 @@ def render_payment_destination_widget(connection):
     """
 
 
-def render_admin_creation_widgets(leafly_strains, coupons):
+def render_admin_creation_widgets(leafly_strains, coupons, products):
     return f"""
     <section class="panel">
       <div class="panel-head">
         <div>
           <span class="eyebrow">Admin Actions</span>
-          <h2>Creation Widgets</h2>
+          <h2>Sales Center</h2>
         </div>
       </div>
       <div class="widget-button-row">
         <button type="button" class="button" id="open-create-account-widget">Create Account</button>
         <button type="button" class="button ghost" id="open-create-product-widget">Add Menu Item</button>
+        <button type="button" class="button ghost" id="open-delete-product-widget">Remove Product</button>
         <button type="button" class="button ghost" id="open-create-coupon-widget">Create Coupon</button>
       </div>
     </section>
@@ -3685,11 +3686,34 @@ def render_admin_creation_widgets(leafly_strains, coupons):
         </div>
       </div>
     </div>
+    <div class="modal-shell is-hidden" id="delete-product-widget-modal">
+      <div class="modal-backdrop" data-close-delete-product-widget="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Catalog</span>
+            <h3>Remove Product</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-delete-product-widget="yes">Close</button>
+        </div>
+        <form method="post" action="/products/delete" class="form-grid">
+          <label>Product
+            <select name="product_id" required>
+              <option value="">Choose product to remove</option>
+              {''.join(f"<option value='{product['id']}'>{html.escape(product['name'])} | {html.escape(product['category'])} | Stock {int(product['stock'] or 0)}</option>" for product in products)}
+            </select>
+          </label>
+          <label>Reason<textarea name="reason" placeholder="Optional internal note for why this item is being removed"></textarea></label>
+          <button type="submit" class="danger">Delete Product</button>
+        </form>
+      </div>
+    </div>
     <script>
       (function () {{
         [
           ['open-create-account-widget', 'create-account-widget-modal', 'data-close-create-account-widget'],
           ['open-create-product-widget', 'create-product-widget-modal', 'data-close-create-product-widget'],
+          ['open-delete-product-widget', 'delete-product-widget-modal', 'data-close-delete-product-widget'],
           ['open-create-coupon-widget', 'create-coupon-widget-modal', 'data-close-create-coupon-widget']
         ].forEach(function (config) {{
           var openButton = document.getElementById(config[0]);
@@ -4504,7 +4528,15 @@ def render_store_page(connection, user=None, message=None, level="info", filters
       }})();
     </script>
     """
-    return page(APP_NAME, body, user=user, message=message, level=level, cart_count=cart_count, extra_shell=render_client_activity_widget(connection, user))
+    return page(
+        APP_NAME,
+        body,
+        user=user,
+        message=message,
+        level=level,
+        cart_count=cart_count,
+        extra_shell=render_client_stats_widget(connection, user) + render_client_activity_widget(connection, user),
+    )
 
 
 def order_form(connection, product_id, user, error=""):
@@ -4540,7 +4572,7 @@ def order_form(connection, product_id, user, error=""):
         """,
         user=user,
         cart_count=client_cart_count(connection, user["id"]),
-        extra_shell=render_client_activity_widget(connection, user),
+        extra_shell=render_client_stats_widget(connection, user) + render_client_activity_widget(connection, user),
     )
 
 
@@ -4699,7 +4731,15 @@ def render_cart_page(connection, user, message=None, level="info"):
       </section>
     </section>
     """
-    return page("Your Bag", body, user=user, message=message, level=level, cart_count=client_cart_count(connection, user["id"]), extra_shell=render_client_activity_widget(connection, user))
+    return page(
+        "Your Bag",
+        body,
+        user=user,
+        message=message,
+        level=level,
+        cart_count=client_cart_count(connection, user["id"]),
+        extra_shell=render_client_stats_widget(connection, user) + render_client_activity_widget(connection, user),
+    )
 
 
 def render_banker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
@@ -5426,7 +5466,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
     {render_payroll_widget(payroll, user["role"])}
     {render_account_recovery_widget(users, user["role"])}
     <section class="admin-grid">
-      {render_admin_creation_widgets(leafly_strains, coupons)}
+      {render_admin_creation_widgets(leafly_strains, coupons, products)}
       {render_credit_issue_panel(connection)}
     </section>
     {render_payment_destination_widget(connection)}
@@ -5742,6 +5782,29 @@ def handle_create_product(environ, start_response, connection, user):
     log_activity(connection, user, "CREATE_PRODUCT", f"Created catalog item {data.get('name', '')}.")
     connection.commit()
     return redirect(start_response, "/admin?message=Menu item created")
+
+
+def handle_delete_product(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"admin", "helpdesk"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    product_id = int(data.get("product_id", "0") or "0")
+    reason = data.get("reason", "").strip()
+    product = connection.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    if not product:
+        return redirect(start_response, "/admin?message=Product not found")
+    linked_ticket = connection.execute("SELECT 1 FROM ticket_items WHERE product_id = ? LIMIT 1", (product_id,)).fetchone()
+    if linked_ticket:
+        return redirect(start_response, "/admin?message=Product is tied to past orders and cannot be deleted")
+    connection.execute("DELETE FROM cart_items WHERE product_id = ?", (product_id,))
+    connection.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    detail = f"Deleted catalog item {product['name']}."
+    if reason:
+        detail += f" Reason: {reason}"
+    log_activity(connection, user, "DELETE_PRODUCT", detail)
+    connection.commit()
+    return redirect(start_response, "/admin?message=Product deleted")
 
 
 def handle_create_coupon(environ, start_response, connection, user):
@@ -6772,6 +6835,8 @@ def application(environ, start_response):
             return handle_clock_action(environ, start_response, connection, user)
         if path == "/products/create" and method == "POST":
             return handle_create_product(environ, start_response, connection, user)
+        if path == "/products/delete" and method == "POST":
+            return handle_delete_product(environ, start_response, connection, user)
         if path == "/coupons/create" and method == "POST":
             return handle_create_coupon(environ, start_response, connection, user)
         if path == "/coupons/delete" and method == "POST":
