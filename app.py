@@ -65,6 +65,7 @@ POSTGRES_CREATE_STATEMENTS = [
         name TEXT,
         email TEXT UNIQUE,
         phone TEXT,
+        address TEXT,
         password_hash TEXT,
         role TEXT,
         account_state TEXT DEFAULT 'ACTIVE',
@@ -142,6 +143,8 @@ POSTGRES_CREATE_STATEMENTS = [
         client_id INTEGER NOT NULL,
         fulfillment_type TEXT DEFAULT 'DELIVERY',
         payment_method TEXT DEFAULT 'CHIME',
+        contact_name TEXT,
+        contact_phone TEXT,
         shipping_address TEXT NOT NULL,
         customer_note TEXT,
         status TEXT NOT NULL,
@@ -991,8 +994,9 @@ def render_cart_widget(connection, user, filters):
             <option value="PICKUP">Pick Up In Person</option>
           </select>
         </label>
+        {render_contact_inputs(user)}
         {render_payment_method_input("payment_method", "CHIME")}
-        {render_address_input("shipping_address", "bag-shipping-address", "Required for delivery, optional for pickup")}
+        {render_address_input("shipping_address", "bag-shipping-address", "Required for delivery, optional for pickup", user["address"] or "")}
         <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
         {render_loyalty_input(user)}
         <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
@@ -1161,6 +1165,122 @@ def render_loyalty_input(user, field_name="loyalty_points_to_use"):
       <input type="number" name="{html.escape(field_name)}" min="0" max="{available_points}" value="0" step="1" placeholder="0">
       <span class="subtle">{available_points} points available. Every {LOYALTY_POINTS_PER_DISCOUNT_DOLLAR} points removes {format_money(1)} from the order.</span>
     </label>
+    """
+
+
+def render_contact_inputs(user, name_field="contact_name", phone_field="contact_phone"):
+    default_name = (user["name"] or "").strip() if user else ""
+    default_phone = (user["phone"] or "").strip() if user else ""
+    return f"""
+    <label>Contact Name<input type="text" name="{html.escape(name_field)}" value="{html.escape(default_name)}" required></label>
+    <label>Phone Number<input type="tel" name="{html.escape(phone_field)}" value="{html.escape(default_phone)}" required></label>
+    """
+
+
+def render_client_profile_widget(user):
+    default_name = (user["name"] or "").strip()
+    default_phone = (user["phone"] or "").strip()
+    default_address = (user["address"] or "").strip()
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Account Settings</span>
+          <h2>Profile Details</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-client-profile-widget">Edit Profile</button>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="client-profile-widget-modal">
+      <div class="modal-backdrop" data-close-client-profile="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Account Settings</span>
+            <h3>Update Profile Details</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-client-profile="yes">Close</button>
+        </div>
+        <form method="post" action="/account/profile-update" class="form-grid">
+          <label>Name<input type="text" name="name" value="{html.escape(default_name)}" required></label>
+          <label>Phone Number<input type="tel" name="phone" value="{html.escape(default_phone)}" required></label>
+          <label>Saved Address<textarea name="address" placeholder="Apartment, street, city, or pickup note">{html.escape(default_address)}</textarea></label>
+          <button type="submit">Save Profile</button>
+        </form>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-client-profile-widget');
+        var modal = document.getElementById('client-profile-widget-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-client-profile="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_engineer_profile_updates_widget(connection):
+    rows = activity_log_rows(
+        connection,
+        "WHERE activity_logs.action = ?",
+        ("UPDATE_CLIENT_PROFILE",),
+        trailing_clause="LIMIT 40",
+    )
+    return f"""
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Account Changes</span>
+          <h2>Client Profile Updates</h2>
+        </div>
+        <button type="button" class="button ghost" id="open-engineer-profile-updates-widget">Open Activity Widget</button>
+      </div>
+      <p>Review client changes to names, phone numbers, and saved addresses.</p>
+    </section>
+    <div class="modal-shell is-hidden" id="engineer-profile-updates-widget-modal">
+      <div class="modal-backdrop" data-close-engineer-profile-updates="yes"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Account Changes</span>
+            <h3>Client Profile Update Activity</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-engineer-profile-updates="yes">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(row['actor_name'] or 'Client')}</span><h3>{html.escape(row['target_user_name'] or row['actor_name'] or 'Client')}</h3></div><span class='menu-count'>{html.escape(row['created_at'])}</span></div><div class='order-meta'><span>Action: {html.escape(row['action'])}</span></div><div class='reason-box'>{html.escape(row['details'] or 'No extra details provided.')}</div></article>" for row in rows) or '<p>No client profile updates logged yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-engineer-profile-updates-widget');
+        var modal = document.getElementById('engineer-profile-updates-widget-modal');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-engineer-profile-updates="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
     """
 
 
@@ -1584,6 +1704,7 @@ def init_db():
                 name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
                 phone TEXT,
+                address TEXT,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL,
                 account_state TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -1648,6 +1769,8 @@ def init_db():
                 client_id INTEGER NOT NULL,
                 fulfillment_type TEXT NOT NULL DEFAULT 'DELIVERY',
                 payment_method TEXT NOT NULL DEFAULT 'CHIME',
+                contact_name TEXT,
+                contact_phone TEXT,
                 shipping_address TEXT NOT NULL,
                 customer_note TEXT,
                 status TEXT NOT NULL,
@@ -1831,6 +1954,7 @@ def init_db():
         ensure_column(connection, "users", "account_state TEXT NOT NULL DEFAULT 'ACTIVE'")
         ensure_column(connection, "users", "account_reason TEXT")
         ensure_column(connection, "users", "phone TEXT")
+        ensure_column(connection, "users", "address TEXT")
         ensure_column(connection, "users", "credit_balance REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "users", "loyalty_points INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "users", "verification_status TEXT NOT NULL DEFAULT 'VERIFIED'")
@@ -1854,6 +1978,8 @@ def init_db():
         ensure_column(connection, "products", "strain_type TEXT NOT NULL DEFAULT ''")
         ensure_column(connection, "tickets", "fulfillment_type TEXT NOT NULL DEFAULT 'DELIVERY'")
         ensure_column(connection, "tickets", "payment_method TEXT NOT NULL DEFAULT 'CHIME'")
+        ensure_column(connection, "tickets", "contact_name TEXT")
+        ensure_column(connection, "tickets", "contact_phone TEXT")
         ensure_column(connection, "tickets", "coupon_code TEXT")
         ensure_column(connection, "tickets", "discount_amount REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "loyalty_discount_amount REAL NOT NULL DEFAULT 0")
@@ -1932,6 +2058,25 @@ def cleanup_generated_tickets(connection):
         )
         connection.execute("DELETE FROM support_tickets WHERE user_id = ?", (demo_client["id"],))
         connection.execute("DELETE FROM tickets WHERE client_id = ?", (demo_client["id"],))
+    emergency_test_ids = [
+        row["id"]
+        for row in connection.execute(
+            """
+            SELECT id
+            FROM support_tickets
+            WHERE category LIKE 'EMERGENCY_%'
+              AND (
+                lower(COALESCE(reason, '')) LIKE '%test%'
+                OR lower(COALESCE(subject, '')) LIKE '%test%'
+                OR lower(COALESCE(resolution_note, '')) LIKE '%test%'
+              )
+            """
+        ).fetchall()
+    ]
+    if emergency_test_ids:
+        placeholders = ",".join("?" for _ in emergency_test_ids)
+        connection.execute(f"DELETE FROM support_messages WHERE support_ticket_id IN ({placeholders})", tuple(emergency_test_ids))
+        connection.execute(f"DELETE FROM support_tickets WHERE id IN ({placeholders})", tuple(emergency_test_ids))
     connection.execute("DELETE FROM tickets WHERE ticket_number LIKE 'BH-LEGACY-%'")
 
 
@@ -1978,6 +2123,7 @@ def render_nav(user, cart_count=0, eta_text=""):
         links.append('<a href="/dashboard">Dashboard</a>')
         if user["role"] == "client":
             links.append(f'<a href="/#bag-widget">Bag ({cart_count})</a>')
+            links.append('<button type="button" class="button ghost nav-activity-button" id="open-client-stats-widget">Stats</button>')
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-activity-widget">Activity</button>')
         if user["role"] in {"banker", "dispatcher", "picker", "driver"}:
             links.append('<button type="button" class="button ghost nav-activity-button" id="open-staff-activity-widget">Activity</button>')
@@ -2041,7 +2187,8 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
   </main>
   <footer class="site-footer">
     <span>Copyright BudHub 2026</span>
-    <span>Dashboard Kernal V 0.3</span>
+    <span>OS TB Kernal v0.4</span>
+    <span>NYS OCM Compliance notice. Must be 21 years of age to purchase. Smoke Responsibly.</span>
   </footer>
   {extra_shell}
   {render_help_button(user)}
@@ -2779,6 +2926,50 @@ def render_client_activity_widget(connection, user):
           modal.classList.remove('is-hidden');
         }});
         modal.querySelectorAll('[data-close-activity="yes"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
+    """
+
+
+def render_client_stats_widget(connection, user):
+    if not user or user["role"] != "client":
+        return ""
+    tickets = ticket_rows(connection, "WHERE tickets.client_id = ?", (user["id"],))
+    return f"""
+    <div class="modal-shell is-hidden" id="client-stats-widget">
+      <div class="modal-backdrop" data-close-client-stats="yes"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Account Stats</span>
+            <h3>Your Shopping Snapshot</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-client-stats="yes">Close</button>
+        </div>
+        <section class="stats-row">
+          <div class="stat-card"><span>Total Tickets</span><strong>{len(tickets)}</strong></div>
+          <div class="stat-card"><span>Bag Items</span><strong>{client_cart_count(connection, user["id"])}</strong></div>
+          <div class="stat-card"><span>Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
+          <div class="stat-card"><span>Loyalty Points</span><strong>{int(user["loyalty_points"] or 0)}</strong></div>
+        </section>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.getElementById('open-client-stats-widget');
+        var modal = document.getElementById('client-stats-widget');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-client-stats="yes"]').forEach(function (node) {{
           node.addEventListener('click', closeModal);
         }});
       }})();
@@ -3888,7 +4079,7 @@ def delivery_block_tickets_map(connection, block_ids):
     return grouped
 
 
-def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, payment_method, coupon_code="", use_credits=False, loyalty_points_to_use=0):
+def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, payment_method, contact_name="", contact_phone="", coupon_code="", use_credits=False, loyalty_points_to_use=0):
     ticket_number = generate_ticket_number(connection)
     timestamp = now_iso()
     client = connection.execute("SELECT * FROM users WHERE id = ?", (client_id,)).fetchone()
@@ -3925,6 +4116,12 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
     payment_method = (payment_method or "CHIME").upper()
     if payment_method not in PAYMENT_METHOD_OPTIONS:
         payment_method = "CHIME"
+    contact_name = (contact_name or client["name"] or "").strip()
+    contact_phone = (contact_phone or client["phone"] or "").strip()
+    if not contact_name:
+        raise ValueError("Contact name is required")
+    if not contact_phone:
+        raise ValueError("Phone number is required")
     payment_status = "VERIFIED" if subtotal - discount_amount - loyalty_discount_amount - credit_applied <= 0 else "PENDING"
     loyalty_points_awarded = loyalty_points_earned(
         {
@@ -3938,15 +4135,17 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
     connection.execute(
         """
         INSERT INTO tickets (
-            ticket_number, client_id, fulfillment_type, payment_method, shipping_address, customer_note, status, payment_status,
+            ticket_number, client_id, fulfillment_type, payment_method, contact_name, contact_phone, shipping_address, customer_note, status, payment_status,
             coupon_code, discount_amount, loyalty_discount_amount, credit_applied, loyalty_points_used, loyalty_points_awarded, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticket_number,
             client_id,
             fulfillment_type,
             payment_method,
+            contact_name,
+            contact_phone,
             shipping_address,
             customer_note,
             payment_status,
@@ -3960,6 +4159,11 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
             timestamp,
         ),
     )
+    if client["name"] != contact_name or (client["phone"] or "") != contact_phone:
+        connection.execute(
+            "UPDATE users SET name = ?, phone = ? WHERE id = ?",
+            (contact_name, contact_phone, client_id),
+        )
     ticket_id = connection.execute("SELECT id FROM tickets WHERE ticket_number = ?", (ticket_number,)).fetchone()["id"]
     for product, quantity in preview_items:
         connection.execute(
@@ -4172,11 +4376,10 @@ def render_store_page(connection, user=None, message=None, level="info", filters
     <section class="hero">
       <div class="hero-copy">
         <span class="eyebrow">Official BudHub | 518 Delivery</span>
-        <h2>The Capital Region's cannabis menu for Albany, Troy, Schenectady, and the wider 518 community.</h2>
+        <h2>The Capital Region's cannabis menu for the wider Capital Region.</h2>
         <p>Browse live flower, concentrates, and edibles</p>
-        {f"<div class='tracker-note'>Available credits: {format_money(user['credit_balance'])}</div>" if user and user['role'] == 'client' else ""}
         <div class="hero-actions">
-          <a class="button" href="{'/#bag-widget' if user and user['role'] == 'client' else '/login'}">{'Open Bag Widget' if user and user['role'] == 'client' else 'Customer Login'}</a>
+          <a class="button" href="{'/#bag-widget' if user and user['role'] == 'client' else '/login'}">{'Open Bag' if user and user['role'] == 'client' else 'Customer Login'}</a>
           <a class="button ghost" href="{'/dashboard' if user else '/register'}">{'View Dashboard' if user else 'Create Account'}</a>
         </div>
       </div>
@@ -4324,8 +4527,9 @@ def order_form(connection, product_id, user, error=""):
               <option value="PICKUP">Pick Up In Person</option>
             </select>
             </label>
+            {render_contact_inputs(user)}
             {render_payment_method_input("payment_method", "CHIME")}
-            {render_address_input("shipping_address", "single-order-address", "Required for delivery, optional for pickup")}
+            {render_address_input("shipping_address", "single-order-address", "Required for delivery, optional for pickup", user["address"] or "")}
             <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
             {render_loyalty_input(user)}
             <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
@@ -4376,6 +4580,8 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Due: {format_money(ticket_due_amount(ticket))}</span>
+          <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
+          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address / Pickup: {html.escape(ticket["shipping_address"])}</span>
         </div>
         <div class="order-meta">
@@ -4407,15 +4613,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
         cards.append(render_ticket_modal(modal_id, f"Ticket {ticket['ticket_number']}", summary_html, detail_html, ticket["id"]))
-    latest = STATUS_LABELS.get(tickets[0]["status"], tickets[0]["status"]) if tickets else "No Orders"
     body = f"""
-    <section class="stats-row">
-      <div class="stat-card"><span>Total Tickets</span><strong>{len(tickets)}</strong></div>
-      <div class="stat-card"><span>Latest Status</span><strong>{html.escape(latest)}</strong></div>
-      <div class="stat-card"><span>Bag Items</span><strong>{client_cart_count(connection, user["id"])}</strong></div>
-      <div class="stat-card"><span>Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
-      <div class="stat-card"><span>Loyalty Points</span><strong>{int(user["loyalty_points"] or 0)}</strong></div>
-    </section>
     <section class="panel">
       <div class="panel-head">
         <h2>Your Budhub Orders</h2>
@@ -4426,6 +4624,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
       </div>
       <div class="order-card-grid">{''.join(cards) if cards else '<p>No orders yet.</p>'}</div>
     </section>
+    {render_client_profile_widget(user)}
     """
     return page(
         "Customer Dashboard",
@@ -4435,7 +4634,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         level=level,
         cart_count=client_cart_count(connection, user["id"]),
         auto_refresh=True,
-        extra_shell=render_client_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_order_success_widget(message, open_ticket),
+        extra_shell=render_client_stats_widget(connection, user) + render_client_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_order_success_widget(message, open_ticket),
     )
 
 
@@ -4488,8 +4687,9 @@ def render_cart_page(connection, user, message=None, level="info"):
               <option value="PICKUP">Pick Up In Person</option>
             </select>
           </label>
+          {render_contact_inputs(user)}
           {render_payment_method_input("payment_method", "CHIME")}
-          {render_address_input("shipping_address", "cart-shipping-address", "Required for delivery, optional for pickup")}
+          {render_address_input("shipping_address", "cart-shipping-address", "Required for delivery, optional for pickup", user["address"] or "")}
           <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
           {render_loyalty_input(user)}
           <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
@@ -4510,6 +4710,11 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
     )
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
+    approved_tickets = ticket_rows(
+        connection,
+        "WHERE tickets.payment_status = 'VERIFIED' AND tickets.banker_id = ?",
+        (user["id"],),
+    )
     cards = []
     for index, ticket in enumerate(tickets):
         action = "<span class='subtle'>Payment already verified.</span>"
@@ -4542,6 +4747,8 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
+          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
@@ -4561,8 +4768,51 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
     <section class="stats-row">
       <div class="stat-card"><span>Waiting for Verification</span><strong>{sum(1 for ticket in tickets if ticket['payment_status'] == 'PENDING' and ticket['status'] not in {'CANCELED', 'DELIVERED'})}</strong></div>
       <div class="stat-card"><span>Tickets on Desk</span><strong>{len(tickets)}</strong></div>
+      <div class="stat-card"><span>Approved Payments</span><strong>{len(approved_tickets)}</strong></div>
     </section>
     <section class="panel"><h2>In-House Bank</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No payment reviews waiting.</p>'}</div></section>
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">Payment History</span>
+          <h2>Previously Approved Payments</h2>
+        </div>
+        <button type="button" class="button ghost" data-open-banker-history="banker-approved-history-widget">Open History</button>
+      </div>
+    </section>
+    <div class="modal-shell is-hidden" id="banker-approved-history-widget">
+      <div class="modal-backdrop" data-close-banker-history="banker-approved-history-widget"></div>
+      <div class="modal-card modal-card-wide">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Payment History</span>
+            <h3>Previously Approved Payments</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-banker-history="banker-approved-history-widget">Close</button>
+        </div>
+        <div class="order-card-grid">
+          {''.join(f"<article class='order-card'><div class='order-card-head'><div><span class='eyebrow'>{html.escape(ticket['ticket_number'])}</span><h3>{html.escape(ticket['contact_name'] or ticket['client_name'])}</h3></div>{status_badge(ticket['status'])}</div><div class='order-meta'><span>Phone: {html.escape(ticket['contact_phone'] or 'Not provided')}</span><span>Method: {html.escape(payment_method_label(ticket['payment_method']))}</span><span>Due: {format_money(ticket_due_amount(ticket))}</span><span>Verified: {html.escape(ticket['updated_at'])}</span></div></article>" for ticket in approved_tickets) or '<p>No approved payments recorded yet.</p>'}
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {{
+        var openButton = document.querySelector('[data-open-banker-history="banker-approved-history-widget"]');
+        var modal = document.getElementById('banker-approved-history-widget');
+        if (!openButton || !modal) {{
+          return;
+        }}
+        function closeModal() {{
+          modal.classList.add('is-hidden');
+        }}
+        openButton.addEventListener('click', function () {{
+          modal.classList.remove('is-hidden');
+        }});
+        modal.querySelectorAll('[data-close-banker-history="banker-approved-history-widget"]').forEach(function (node) {{
+          node.addEventListener('click', closeModal);
+        }});
+      }})();
+    </script>
     {render_credit_issue_panel(connection)}
     """
     return page("Bank Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
@@ -4713,6 +4963,8 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
+          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
@@ -4889,6 +5141,8 @@ def render_picker_dashboard(connection, user, message=None, level="info", open_t
           <span>Total Units: {ticket["total_units"]}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Open board')}</span>
+          <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
+          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
@@ -4947,6 +5201,8 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
+          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
@@ -4991,6 +5247,8 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
+          <span>Contact: {html.escape(ticket["contact_name"] or ticket["client_name"])}</span>
+          <span>Phone: {html.escape(ticket["contact_phone"] or "Not provided")}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Direct assignment')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
@@ -5172,6 +5430,7 @@ def render_admin_dashboard(connection, user, message=None, level="info"):
       {render_credit_issue_panel(connection)}
     </section>
     {render_payment_destination_widget(connection)}
+    {render_engineer_profile_updates_widget(connection) if user["role"] == "helpdesk" else ""}
     <section class="panel">
       <h2>Latest Budhub Tickets</h2>
       <table>
@@ -5359,7 +5618,8 @@ def handle_login(environ, start_response, connection):
     log_activity(connection, user, "LOGIN", "Signed into Budhub.")
     token = create_session(connection, user["id"])
     connection.commit()
-    return redirect(start_response, "/dashboard", f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax")
+    destination = "/" if user["role"] == "client" else "/dashboard"
+    return redirect(start_response, destination, f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax")
 
 
 def handle_register(environ, start_response, connection):
@@ -5415,6 +5675,38 @@ def handle_register(environ, start_response, connection):
     log_activity(connection, created_user, "REGISTER", "Created a customer account and uploaded verification documents.", target_user_id=user_id)
     connection.commit()
     return redirect(start_response, "/login?message=Account created and waiting for ID verification")
+
+
+def handle_update_client_profile(environ, start_response, connection, user):
+    gate = require_role(start_response, user, {"client"})
+    if gate:
+        return gate
+    data = read_post_data(environ)
+    name = data.get("name", "").strip()
+    phone = data.get("phone", "").strip()
+    address = data.get("address", "").strip()
+    if not name:
+        return redirect(start_response, "/dashboard?message=Name is required")
+    if not phone:
+        return redirect(start_response, "/dashboard?message=Phone number is required")
+    if name_exists(connection, name, exclude_user_id=user["id"]):
+        return redirect(start_response, "/dashboard?message=That name is already in use")
+    previous_name = user["name"] or ""
+    previous_phone = user["phone"] or ""
+    previous_address = user["address"] or ""
+    connection.execute(
+        "UPDATE users SET name = ?, phone = ?, address = ? WHERE id = ?",
+        (name, phone, address, user["id"]),
+    )
+    log_activity(
+        connection,
+        user,
+        "UPDATE_CLIENT_PROFILE",
+        f"Updated profile from Name: {previous_name or 'None'}, Phone: {previous_phone or 'None'}, Address: {previous_address or 'None'} to Name: {name}, Phone: {phone}, Address: {address or 'None'}.",
+        target_user_id=user["id"],
+    )
+    connection.commit()
+    return redirect(start_response, "/dashboard?message=Profile updated")
 
 
 def handle_create_product(environ, start_response, connection, user):
@@ -5748,11 +6040,17 @@ def handle_create_order(environ, start_response, connection, user):
     data = read_post_data(environ)
     fulfillment_type = data.get("fulfillment_type", "DELIVERY")
     payment_method = data.get("payment_method", "CHIME")
+    contact_name = data.get("contact_name", "").strip()
+    contact_phone = data.get("contact_phone", "").strip()
     try:
         loyalty_points_to_use = max(0, int(data.get("loyalty_points_to_use", "0") or 0))
     except ValueError:
         loyalty_points_to_use = 0
     shipping_address = data.get("shipping_address", "").strip()
+    if not contact_name:
+        return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "Contact name is required"))
+    if not contact_phone:
+        return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "Phone number is required"))
     if fulfillment_type == "DELIVERY" and not shipping_address:
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "Delivery address is required for delivery orders."))
     if fulfillment_type == "PICKUP" and not shipping_address:
@@ -5766,6 +6064,8 @@ def handle_create_order(environ, start_response, connection, user):
             data.get("customer_note", "").strip(),
             fulfillment_type,
             payment_method,
+            contact_name,
+            contact_phone,
             data.get("coupon_code", ""),
             data.get("use_credits") == "yes",
             loyalty_points_to_use,
@@ -5788,11 +6088,17 @@ def handle_cart_checkout(environ, start_response, connection, user):
         return redirect_with_message(start_response, return_to, "Your bag is empty")
     fulfillment_type = data.get("fulfillment_type", "DELIVERY")
     payment_method = data.get("payment_method", "CHIME")
+    contact_name = data.get("contact_name", "").strip()
+    contact_phone = data.get("contact_phone", "").strip()
     try:
         loyalty_points_to_use = max(0, int(data.get("loyalty_points_to_use", "0") or 0))
     except ValueError:
         loyalty_points_to_use = 0
     shipping_address = data.get("shipping_address", "").strip()
+    if not contact_name:
+        return redirect_with_message(start_response, return_to, "Contact name is required")
+    if not contact_phone:
+        return redirect_with_message(start_response, return_to, "Phone number is required")
     if fulfillment_type == "DELIVERY" and not shipping_address:
         return redirect_with_message(start_response, return_to, "Delivery address is required")
     if fulfillment_type == "PICKUP" and not shipping_address:
@@ -5806,6 +6112,8 @@ def handle_cart_checkout(environ, start_response, connection, user):
             data.get("customer_note", "").strip(),
             fulfillment_type,
             payment_method,
+            contact_name,
+            contact_phone,
             data.get("coupon_code", ""),
             data.get("use_credits") == "yes",
             loyalty_points_to_use,
@@ -6429,6 +6737,8 @@ def application(environ, start_response):
             if account_restricted(user):
                 return text_response(start_response, restricted_account_page(user),)
             return text_response(start_response, render_dashboard(connection, user, message=message, open_ticket_id=params.get("open_ticket")))
+        if path == "/account/profile-update" and method == "POST":
+            return handle_update_client_profile(environ, start_response, connection, user)
         if path == "/help":
             gate = require_user(start_response, user)
             return gate or text_response(start_response, render_helpdesk_dashboard(connection, user, message=message))
