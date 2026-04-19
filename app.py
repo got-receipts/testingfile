@@ -5,7 +5,6 @@ import os
 import re
 import secrets
 import sqlite3
-import traceback
 from datetime import datetime, timedelta
 from http import cookies
 from urllib.error import HTTPError, URLError
@@ -706,6 +705,7 @@ class PostgreSQLCursorWrapper:
         else:
             self._cursor = connection._connection.cursor()
         self.lastrowid = None
+        self._prefetched_row = None
 
     def _normalize_query(self, query):
         normalized = query.replace("COLLATE NOCASE", "")
@@ -725,6 +725,7 @@ class PostgreSQLCursorWrapper:
             if column_names == ["id"] and normalized.lstrip().lower().startswith("insert into"):
                 row = self._cursor.fetchone()
                 self.lastrowid = row["id"] if isinstance(row, dict) else row[0]
+                self._prefetched_row = row
         return self
 
     def executemany(self, query, seq_of_params):
@@ -734,13 +735,27 @@ class PostgreSQLCursorWrapper:
         return self
 
     def fetchone(self):
-        return self._cursor.fetchone()
+        if self._prefetched_row is not None:
+            row = self._prefetched_row
+            self._prefetched_row = None
+            self.close()
+            return row
+        row = self._cursor.fetchone()
+        self.close()
+        return row
 
     def fetchall(self):
-        return self._cursor.fetchall()
+        rows = []
+        if self._prefetched_row is not None:
+            rows.append(self._prefetched_row)
+            self._prefetched_row = None
+        rows.extend(self._cursor.fetchall())
+        self.close()
+        return rows
 
     def close(self):
-        self._cursor.close()
+        if self._cursor is not None and not self._cursor.closed:
+            self._cursor.close()
 
     def __enter__(self):
         return self
@@ -812,11 +827,7 @@ def sqlite_connection():
 
 def db_connection():
     if postgres_enabled():
-        try:
-            return PostgreSQLConnectionWrapper(postgres_database_url())
-        except Exception as exc:
-            print(f"PostgreSQL connection failed, falling back to SQLite: {exc}")
-            traceback.print_exc()
+        return PostgreSQLConnectionWrapper(postgres_database_url())
     return sqlite_connection()
 
 
@@ -937,6 +948,7 @@ def init_postgres_db():
         with PostgreSQLConnectionWrapper(postgres_database_url()) as connection:
             create_postgres_schema(connection)
         bootstrap_postgres_from_sqlite()
+        print("PostgreSQL primary database initialized")
     except Exception as exc:
         print(f"PostgreSQL initialization skipped: {exc}")
 
