@@ -3511,15 +3511,6 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         </div>
       </div>
       <div class="hero-side">
-        <div class="hero-media-frame">
-          <video class="hero-video" autoplay muted loop playsinline preload="metadata" poster="/static/budhub-logo.png">
-            <source src="/static/rolling_banner.mp4" type="video/mp4">
-          </video>
-          <div class="hero-video-overlay">
-            <strong>Official BudHub</strong>
-            <span>Capital Region cannabis delivery, built by locals for locals.</span>
-          </div>
-        </div>
         <div class="hero-summary">
           <span class="eyebrow">Current Menu</span>
           <strong>{len(products)} items available</strong>
