@@ -44,6 +44,8 @@ PAYMENT_METHOD_LABELS = {
     "GOOGLE_PAY": "Google Pay",
     "CASH": "Cash",
 }
+LOYALTY_POINTS_PER_DOLLAR = 1
+LOYALTY_POINTS_PER_DISCOUNT_DOLLAR = 20
 DEFAULT_PAYMENT_DESTINATIONS = [
     ("VENMO", "Venmo", "Rudolph Bowen", "https://venmo.com/u/Rudolph-Bowen", 1, 1),
     ("VENMO", "Venmo", "Jesenia Fields", "https://venmo.com/u/Jesenia-Fields", 2, 1),
@@ -62,11 +64,13 @@ POSTGRES_CREATE_STATEMENTS = [
         id SERIAL PRIMARY KEY,
         name TEXT,
         email TEXT UNIQUE,
+        phone TEXT,
         password_hash TEXT,
         role TEXT,
         account_state TEXT DEFAULT 'ACTIVE',
         account_reason TEXT,
         credit_balance REAL DEFAULT 0,
+        loyalty_points INTEGER DEFAULT 0,
         verification_status TEXT DEFAULT 'VERIFIED',
         verification_note TEXT,
         id_front_path TEXT,
@@ -144,7 +148,10 @@ POSTGRES_CREATE_STATEMENTS = [
         payment_status TEXT NOT NULL,
         coupon_code TEXT,
         discount_amount REAL DEFAULT 0,
+        loyalty_discount_amount REAL DEFAULT 0,
         credit_applied REAL DEFAULT 0,
+        loyalty_points_used INTEGER DEFAULT 0,
+        loyalty_points_awarded INTEGER DEFAULT 0,
         banker_id INTEGER,
         dispatcher_id INTEGER,
         picker_id INTEGER,
@@ -261,6 +268,16 @@ POSTGRES_CREATE_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS loyalty_ledger (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        ticket_id INTEGER,
+        points_delta INTEGER NOT NULL,
+        note TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS user_stats (
         user_id INTEGER PRIMARY KEY,
         is_employee INTEGER DEFAULT 0,
@@ -299,6 +316,7 @@ POSTGRES_SYNC_TABLES = [
     "payment_destinations",
     "coupons",
     "credit_ledger",
+    "loyalty_ledger",
     "user_stats",
     "time_clock_entries",
 ]
@@ -318,6 +336,7 @@ POSTGRES_SERIAL_TABLES = {
     "guest_help_requests",
     "coupons",
     "credit_ledger",
+    "loyalty_ledger",
     "time_clock_entries",
 }
 
@@ -921,7 +940,7 @@ def render_cart_widget(connection, user, filters):
     if not user or user["role"] != "client":
         return """
         <aside class="panel cart-widget" id="bag-widget">
-          <span class="eyebrow">Bag Widget</span>
+          <span class="eyebrow">Your Bag</span>
           <h2>Sign in to build a bag</h2>
           <a class="button" href="/login">Customer Login</a>
         </aside>
@@ -954,7 +973,7 @@ def render_cart_widget(connection, user, filters):
     <aside class="panel cart-widget" id="bag-widget">
       <div class="bag-head">
         <div>
-          <span class="eyebrow">Bag Widget</span>
+          <span class="eyebrow">Your Bag</span>
           <h2>Your Bag</h2>
         </div>
         <span class="menu-count">{client_cart_count(connection, user["id"])} items</span>
@@ -963,6 +982,7 @@ def render_cart_widget(connection, user, filters):
       <div class="bag-checkout-shell">
       <div class="checkout-total"><span>Subtotal</span><strong>{format_money(subtotal)}</strong></div>
       <div class="checkout-total"><span>Available Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
+      <div class="checkout-total"><span>Loyalty Points</span><strong>{int(user["loyalty_points"] or 0)}</strong></div>
       <form method="post" action="/cart/checkout" class="form-grid bag-checkout">
         <input type="hidden" name="return_to" value="{html.escape(return_to)}">
         <label>How will you get it?
@@ -974,6 +994,7 @@ def render_cart_widget(connection, user, filters):
         {render_payment_method_input("payment_method", "CHIME")}
         {render_address_input("shipping_address", "bag-shipping-address", "Required for delivery, optional for pickup")}
         <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
+        {render_loyalty_input(user)}
         <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
         <label>Driver Note<textarea name="customer_note" placeholder="Gate code, apartment, or delivery note"></textarea></label>
         <button type="submit" {'disabled' if not items else ''}>Place Order</button>
@@ -1133,6 +1154,16 @@ def render_payment_method_input(field_name, selected_value=""):
     """
 
 
+def render_loyalty_input(user, field_name="loyalty_points_to_use"):
+    available_points = int((user["loyalty_points"] or 0) if user else 0)
+    return f"""
+    <label>Loyalty Points to Use
+      <input type="number" name="{html.escape(field_name)}" min="0" max="{available_points}" value="0" step="1" placeholder="0">
+      <span class="subtle">{available_points} points available. Every {LOYALTY_POINTS_PER_DISCOUNT_DOLLAR} points removes {format_money(1)} from the order.</span>
+    </label>
+    """
+
+
 def render_payment_instructions(ticket):
     rows = []
     try:
@@ -1140,7 +1171,7 @@ def render_payment_instructions(ticket):
             rows = payment_destination_rows(payment_connection, ticket["payment_method"], active_only=True)
     except Exception:
         rows = []
-    due_amount = format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))
+    due_amount = format_money(ticket_due_amount(ticket))
     if rows:
         destinations = "".join(
             f"<div class='item-pill'><strong>{html.escape(row['account_name'])}</strong><span>{html.escape(row['payment_link'] or row['display_name'])}</span></div>"
@@ -1152,7 +1183,9 @@ def render_payment_instructions(ticket):
     return f"""
     <div class="reason-box">
       <strong>Payment Method:</strong> {html.escape(payment_method_label(ticket["payment_method"]))}<br>
-      <strong>Amount Due:</strong> {due_amount}
+      <strong>Amount Due:</strong> {due_amount}<br>
+      <strong>Loyalty Used:</strong> {int(ticket["loyalty_points_used"] or 0)} pts<br>
+      <strong>Loyalty Earned:</strong> {int(ticket["loyalty_points_awarded"] or 0)} pts
     </div>
     {details}
     """
@@ -1550,11 +1583,13 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
+                phone TEXT,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL,
                 account_state TEXT NOT NULL DEFAULT 'ACTIVE',
                 account_reason TEXT,
                 credit_balance REAL NOT NULL DEFAULT 0,
+                loyalty_points INTEGER NOT NULL DEFAULT 0,
                 verification_status TEXT NOT NULL DEFAULT 'VERIFIED',
                 verification_note TEXT,
                 id_front_path TEXT,
@@ -1619,7 +1654,10 @@ def init_db():
                 payment_status TEXT NOT NULL,
                 coupon_code TEXT,
                 discount_amount REAL NOT NULL DEFAULT 0,
+                loyalty_discount_amount REAL NOT NULL DEFAULT 0,
                 credit_applied REAL NOT NULL DEFAULT 0,
+                loyalty_points_used INTEGER NOT NULL DEFAULT 0,
+                loyalty_points_awarded INTEGER NOT NULL DEFAULT 0,
                 banker_id INTEGER,
                 dispatcher_id INTEGER,
                 picker_id INTEGER,
@@ -1758,6 +1796,17 @@ def init_db():
                 FOREIGN KEY (issued_by) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS loyalty_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ticket_id INTEGER,
+                points_delta INTEGER NOT NULL,
+                note TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+            );
+
             CREATE TABLE IF NOT EXISTS user_stats (
                 user_id INTEGER PRIMARY KEY,
                 is_employee INTEGER NOT NULL DEFAULT 0,
@@ -1781,7 +1830,9 @@ def init_db():
         )
         ensure_column(connection, "users", "account_state TEXT NOT NULL DEFAULT 'ACTIVE'")
         ensure_column(connection, "users", "account_reason TEXT")
+        ensure_column(connection, "users", "phone TEXT")
         ensure_column(connection, "users", "credit_balance REAL NOT NULL DEFAULT 0")
+        ensure_column(connection, "users", "loyalty_points INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "users", "verification_status TEXT NOT NULL DEFAULT 'VERIFIED'")
         ensure_column(connection, "users", "verification_note TEXT")
         ensure_column(connection, "users", "id_front_path TEXT")
@@ -1805,7 +1856,10 @@ def init_db():
         ensure_column(connection, "tickets", "payment_method TEXT NOT NULL DEFAULT 'CHIME'")
         ensure_column(connection, "tickets", "coupon_code TEXT")
         ensure_column(connection, "tickets", "discount_amount REAL NOT NULL DEFAULT 0")
+        ensure_column(connection, "tickets", "loyalty_discount_amount REAL NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "credit_applied REAL NOT NULL DEFAULT 0")
+        ensure_column(connection, "tickets", "loyalty_points_used INTEGER NOT NULL DEFAULT 0")
+        ensure_column(connection, "tickets", "loyalty_points_awarded INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "tickets", "delivery_block_id INTEGER")
 
         seed_leafly_strains(connection)
@@ -2057,15 +2111,16 @@ def login_form(error="", notice=""):
 
 def register_form(error=""):
     return f"""
-    <section class="panel narrow">
-      <h2>Create Customer Account</h2>
-      <p>Join BudHub for verified cannabis ordering in the Capital Region. Upload your ID front, ID back, and a selfie holding your ID so the team can approve your account.</p>
-      {flash_message(error, "error")}
-      <form method="post" action="/register" class="form-grid" enctype="multipart/form-data">
-        <label>Full Name<input type="text" name="name" required></label>
-        <label>Email<input type="email" name="email" required></label>
-        <label>Password<input type="password" name="password" minlength="6" required></label>
-        <label>ID Front Photo<input type="file" name="id_front" accept="image/*" required></label>
+        <section class="panel narrow">
+          <h2>Create Customer Account</h2>
+          <p>Join BudHub for verified cannabis ordering in the Capital Region. Upload your ID front, ID back, and a selfie holding your ID so the team can approve your account.</p>
+          {flash_message(error, "error")}
+          <form method="post" action="/register" class="form-grid" enctype="multipart/form-data">
+            <label>Full Name<input type="text" name="name" required></label>
+            <label>Email<input type="email" name="email" required></label>
+            <label>Phone Number<input type="tel" name="phone" required></label>
+            <label>Password<input type="password" name="password" minlength="6" required></label>
+            <label>ID Front Photo<input type="file" name="id_front" accept="image/*" required></label>
         <label>ID Back Photo<input type="file" name="id_back" accept="image/*" required></label>
         <label>Selfie Holding ID<input type="file" name="id_selfie" accept="image/*" required></label>
         <button type="submit">Create Account</button>
@@ -2153,6 +2208,7 @@ def ticket_rows(connection, where_clause="", params=()):
                COALESCE(SUM(ticket_items.quantity * ticket_items.locked_price), 0) AS total_amount,
                COALESCE(SUM(ticket_items.quantity), 0) AS total_units,
                tickets.discount_amount AS discount_amount,
+               tickets.loyalty_discount_amount AS loyalty_discount_amount,
                tickets.credit_applied AS credit_applied
         FROM tickets
         JOIN users AS clients ON clients.id = tickets.client_id
@@ -2454,12 +2510,13 @@ def delivered_sales_sum(connection, modifier):
     row = connection.execute(
         f"""
         SELECT COALESCE(SUM(
-            COALESCE(total_amount, 0) - COALESCE(discount_amount, 0) - COALESCE(credit_applied, 0)
+            COALESCE(total_amount, 0) - COALESCE(discount_amount, 0) - COALESCE(loyalty_discount_amount, 0) - COALESCE(credit_applied, 0)
         ), 0) AS total
         FROM (
             SELECT tickets.id,
                    COALESCE(SUM(ticket_items.quantity * ticket_items.locked_price), 0) AS total_amount,
                    tickets.discount_amount AS discount_amount,
+                   tickets.loyalty_discount_amount AS loyalty_discount_amount,
                    tickets.credit_applied AS credit_applied,
                    tickets.updated_at AS updated_at
             FROM tickets
@@ -2504,11 +2561,44 @@ def coupon_discount_amount(coupon, subtotal):
     return round(min(subtotal, coupon["discount_value"]), 2)
 
 
-def payment_summary(subtotal, discount_amount, credit_applied):
-    due = round(max(0.0, subtotal - discount_amount - credit_applied), 2)
+def loyalty_discount_from_points(points_to_use, available_points, subtotal, discount_amount, credit_applied):
+    usable_points = max(0, min(int(points_to_use or 0), int(available_points or 0)))
+    max_discount = max(0.0, round(subtotal - discount_amount - credit_applied, 2))
+    loyalty_discount_amount = round(min(max_discount, usable_points / LOYALTY_POINTS_PER_DISCOUNT_DOLLAR), 2)
+    applied_points = min(usable_points, int(round(loyalty_discount_amount * LOYALTY_POINTS_PER_DISCOUNT_DOLLAR)))
+    return applied_points, loyalty_discount_amount
+
+
+def ticket_due_amount(ticket):
+    return round(
+        max(
+            0.0,
+            float(ticket["total_amount"] or 0)
+            - float(ticket["discount_amount"] or 0)
+            - float(ticket["loyalty_discount_amount"] or 0)
+            - float(ticket["credit_applied"] or 0),
+        ),
+        2,
+    )
+
+
+def loyalty_points_earned(ticket):
+    net_spend = max(
+        0.0,
+        float(ticket["total_amount"] or 0)
+        - float(ticket["discount_amount"] or 0)
+        - float(ticket["loyalty_discount_amount"] or 0)
+        - float(ticket["credit_applied"] or 0),
+    )
+    return max(0, int(net_spend // LOYALTY_POINTS_PER_DOLLAR))
+
+
+def payment_summary(subtotal, discount_amount, credit_applied, loyalty_discount_amount=0.0):
+    due = round(max(0.0, subtotal - discount_amount - loyalty_discount_amount - credit_applied), 2)
     return {
         "subtotal": round(subtotal, 2),
         "discount_amount": round(discount_amount, 2),
+        "loyalty_discount_amount": round(loyalty_discount_amount, 2),
         "credit_applied": round(credit_applied, 2),
         "payment_due": due,
     }
@@ -3798,7 +3888,7 @@ def delivery_block_tickets_map(connection, block_ids):
     return grouped
 
 
-def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, payment_method, coupon_code="", use_credits=False):
+def create_ticket(connection, client_id, items, shipping_address, customer_note, fulfillment_type, payment_method, coupon_code="", use_credits=False, loyalty_points_to_use=0):
     ticket_number = generate_ticket_number(connection)
     timestamp = now_iso()
     client = connection.execute("SELECT * FROM users WHERE id = ?", (client_id,)).fetchone()
@@ -3824,17 +3914,33 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
     discount_amount = coupon_discount_amount(coupon, subtotal)
     available_credit = float(client["credit_balance"] or 0)
     credit_applied = round(min(max(0.0, available_credit), max(0.0, subtotal - discount_amount)), 2) if use_credits else 0.0
+    available_loyalty_points = int(client["loyalty_points"] or 0)
+    loyalty_points_used, loyalty_discount_amount = loyalty_discount_from_points(
+        loyalty_points_to_use,
+        available_loyalty_points,
+        subtotal,
+        discount_amount,
+        credit_applied,
+    )
     payment_method = (payment_method or "CHIME").upper()
     if payment_method not in PAYMENT_METHOD_OPTIONS:
         payment_method = "CHIME"
-    payment_status = "VERIFIED" if subtotal - discount_amount - credit_applied <= 0 else "PENDING"
+    payment_status = "VERIFIED" if subtotal - discount_amount - loyalty_discount_amount - credit_applied <= 0 else "PENDING"
+    loyalty_points_awarded = loyalty_points_earned(
+        {
+            "total_amount": subtotal,
+            "discount_amount": discount_amount,
+            "loyalty_discount_amount": loyalty_discount_amount,
+            "credit_applied": credit_applied,
+        }
+    )
 
     connection.execute(
         """
         INSERT INTO tickets (
             ticket_number, client_id, fulfillment_type, payment_method, shipping_address, customer_note, status, payment_status,
-            coupon_code, discount_amount, credit_applied, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?)
+            coupon_code, discount_amount, loyalty_discount_amount, credit_applied, loyalty_points_used, loyalty_points_awarded, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'PACKING', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ticket_number,
@@ -3846,7 +3952,10 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
             payment_status,
             coupon_code or None,
             discount_amount,
+            loyalty_discount_amount,
             credit_applied,
+            loyalty_points_used,
+            loyalty_points_awarded,
             timestamp,
             timestamp,
         ),
@@ -3870,12 +3979,81 @@ def create_ticket(connection, client_id, items, shipping_address, customer_note,
             """,
             (client_id, client_id, -credit_applied, f"Applied to ticket {ticket_number}", now_iso()),
         )
+    if loyalty_points_used > 0:
+        connection.execute(
+            "UPDATE users SET loyalty_points = MAX(0, loyalty_points - ?) WHERE id = ?",
+            (loyalty_points_used, client_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO loyalty_ledger (user_id, ticket_id, points_delta, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (client_id, ticket_id, -loyalty_points_used, f"Redeemed on ticket {ticket_number}", now_iso()),
+        )
     if coupon and coupon["uses_remaining"] is not None:
         connection.execute(
             "UPDATE coupons SET uses_remaining = CASE WHEN uses_remaining > 0 THEN uses_remaining - 1 ELSE 0 END WHERE id = ?",
             (coupon["id"],),
         )
     return ticket_id
+
+
+def restore_ticket_balances(connection, ticket):
+    if not ticket or ticket["status"] in {"CANCELED", "DELIVERED"}:
+        return
+    if float(ticket["credit_applied"] or 0) > 0:
+        connection.execute(
+            "UPDATE users SET credit_balance = credit_balance + ? WHERE id = ?",
+            (float(ticket["credit_applied"] or 0), ticket["client_id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO credit_ledger (user_id, issued_by, amount, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (ticket["client_id"], ticket["client_id"], float(ticket["credit_applied"] or 0), f"Returned from ticket {ticket['ticket_number']}", now_iso()),
+        )
+    if int(ticket["loyalty_points_used"] or 0) > 0:
+        connection.execute(
+            "UPDATE users SET loyalty_points = loyalty_points + ? WHERE id = ?",
+            (int(ticket["loyalty_points_used"] or 0), ticket["client_id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO loyalty_ledger (user_id, ticket_id, points_delta, note, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (ticket["client_id"], ticket["id"], int(ticket["loyalty_points_used"] or 0), f"Returned from canceled ticket {ticket['ticket_number']}", now_iso()),
+        )
+    if ticket["coupon_code"]:
+        coupon = connection.execute("SELECT * FROM coupons WHERE code = ?", (ticket["coupon_code"],)).fetchone()
+        if coupon and coupon["uses_remaining"] is not None:
+            connection.execute("UPDATE coupons SET uses_remaining = uses_remaining + 1 WHERE id = ?", (coupon["id"],))
+
+
+def award_loyalty_points_for_ticket(connection, ticket, actor=None):
+    if not ticket or ticket["status"] != "DELIVERED" or int(ticket["loyalty_points_awarded"] or 0) <= 0:
+        return
+    already_awarded = connection.execute(
+        "SELECT id FROM loyalty_ledger WHERE user_id = ? AND ticket_id = ? AND points_delta = ? LIMIT 1",
+        (ticket["client_id"], ticket["id"], int(ticket["loyalty_points_awarded"] or 0)),
+    ).fetchone()
+    if already_awarded:
+        return
+    connection.execute(
+        "UPDATE users SET loyalty_points = loyalty_points + ? WHERE id = ?",
+        (int(ticket["loyalty_points_awarded"] or 0), ticket["client_id"]),
+    )
+    connection.execute(
+        """
+        INSERT INTO loyalty_ledger (user_id, ticket_id, points_delta, note, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (ticket["client_id"], ticket["id"], int(ticket["loyalty_points_awarded"] or 0), f"Earned from ticket {ticket['ticket_number']}", now_iso()),
+    )
+    if actor:
+        log_activity(connection, actor, "AWARD_LOYALTY_POINTS", f"Awarded {int(ticket['loyalty_points_awarded'] or 0)} loyalty points for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
 
 
 def release_ticket_stock(connection, ticket_id):
@@ -3995,7 +4173,7 @@ def render_store_page(connection, user=None, message=None, level="info", filters
       <div class="hero-copy">
         <span class="eyebrow">Official BudHub | 518 Delivery</span>
         <h2>The Capital Region's cannabis menu for Albany, Troy, Schenectady, and the wider 518 community.</h2>
-        <p>Browse live flower, concentrates, and edibles with submenu filtering, Leafly-connected strain references, fast name search, and an in-page bag widget that keeps customers shopping without interruption.</p>
+        <p>Browse live flower, concentrates, and edibles</p>
         {f"<div class='tracker-note'>Available credits: {format_money(user['credit_balance'])}</div>" if user and user['role'] == 'client' else ""}
         <div class="hero-actions">
           <a class="button" href="{'/#bag-widget' if user and user['role'] == 'client' else '/login'}">{'Open Bag Widget' if user and user['role'] == 'client' else 'Customer Login'}</a>
@@ -4149,6 +4327,7 @@ def order_form(connection, product_id, user, error=""):
             {render_payment_method_input("payment_method", "CHIME")}
             {render_address_input("shipping_address", "single-order-address", "Required for delivery, optional for pickup")}
             <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
+            {render_loyalty_input(user)}
             <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
             <label>Driver Note<textarea name="customer_note" placeholder="Gate code, apartment, or quick note"></textarea></label>
             <button type="submit">Place Order</button>
@@ -4184,7 +4363,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
         </div>
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
-          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Due: {format_money(ticket_due_amount(ticket))}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
         </div>
         """
@@ -4196,12 +4375,15 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Total: {format_money(ticket["total_amount"])}</span>
-          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Due: {format_money(ticket_due_amount(ticket))}</span>
           <span>Address / Pickup: {html.escape(ticket["shipping_address"])}</span>
         </div>
         <div class="order-meta">
           <span>Coupon: {html.escape(ticket["coupon_code"] or "None")}</span>
           <span>Discount: {format_money(ticket["discount_amount"])}</span>
+          <span>Loyalty Discount: {format_money(ticket["loyalty_discount_amount"] or 0)}</span>
+          <span>Loyalty Used: {int(ticket["loyalty_points_used"] or 0)} pts</span>
+          <span>Loyalty Earned: {int(ticket["loyalty_points_awarded"] or 0)} pts</span>
           <span>Credits Used: {format_money(ticket["credit_applied"])}</span>
         </div>
         {render_payment_instructions(ticket)}
@@ -4232,6 +4414,7 @@ def render_client_dashboard(connection, user, message=None, level="info", open_t
       <div class="stat-card"><span>Latest Status</span><strong>{html.escape(latest)}</strong></div>
       <div class="stat-card"><span>Bag Items</span><strong>{client_cart_count(connection, user["id"])}</strong></div>
       <div class="stat-card"><span>Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
+      <div class="stat-card"><span>Loyalty Points</span><strong>{int(user["loyalty_points"] or 0)}</strong></div>
     </section>
     <section class="panel">
       <div class="panel-head">
@@ -4296,6 +4479,7 @@ def render_cart_page(connection, user, message=None, level="info"):
         <div class="checkout-total"><span>Items</span><strong>{client_cart_count(connection, user["id"])}</strong></div>
         <div class="checkout-total"><span>Subtotal</span><strong>{format_money(subtotal)}</strong></div>
         <div class="checkout-total"><span>Available Credits</span><strong>{format_money(user["credit_balance"])}</strong></div>
+        <div class="checkout-total"><span>Loyalty Points</span><strong>{int(user["loyalty_points"] or 0)}</strong></div>
         <form method="post" action="/cart/checkout" class="form-grid">
           <input type="hidden" name="return_to" value="/cart">
           <label>How will you get it?
@@ -4304,8 +4488,10 @@ def render_cart_page(connection, user, message=None, level="info"):
               <option value="PICKUP">Pick Up In Person</option>
             </select>
           </label>
+          {render_payment_method_input("payment_method", "CHIME")}
           {render_address_input("shipping_address", "cart-shipping-address", "Required for delivery, optional for pickup")}
           <label>Coupon Code<input type="text" name="coupon_code" placeholder="Optional"></label>
+          {render_loyalty_input(user)}
           <label class="checkbox-row"><input type="checkbox" name="use_credits" value="yes"> Apply available account credits ({format_money(user["credit_balance"])})</label>
           <label>Driver Note<textarea name="customer_note" placeholder="Gate code, apartment, or delivery note"></textarea></label>
           <button type="submit" {'disabled' if not items else ''}>Place Order</button>
@@ -4347,7 +4533,7 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
-          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
         """
         maps_link = google_maps_link(ticket["shipping_address"])
@@ -4359,7 +4545,7 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
-          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
         {render_payment_instructions(ticket)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
@@ -4531,7 +4717,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
           <span>Driver: {html.escape(ticket["driver_name"] or 'Unassigned')}</span>
           <span>Block: {html.escape(ticket["delivery_block_name"] or 'Not in block')}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
-          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
@@ -4767,7 +4953,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>{'Active Ticket: Yes' if ticket["status"] == 'OUT_FOR_DELIVERY' else 'Active Ticket: Waiting to Start'}</span>
           <span>Payment: {html.escape(ticket["payment_status"])}</span>
           <span>Method: {html.escape(payment_method_label(ticket["payment_method"]))}</span>
-          <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
+          <span>Due: {format_money(ticket_due_amount(ticket))}</span>
         </div>
         {render_payment_instructions(ticket)}
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
@@ -5185,9 +5371,12 @@ def handle_register(environ, start_response, connection):
         files = {}
     email = data.get("email", "").lower()
     name = data.get("name", "").strip()
+    phone = data.get("phone", "").strip()
     password = data.get("password", "")
     if not name:
         return text_response(start_response, page("Register", register_form("Name is required.")))
+    if not phone:
+        return text_response(start_response, page("Register", register_form("Phone number is required.")))
     if len(password) < 6:
         return text_response(start_response, page("Register", register_form("Password must be at least 6 characters long.")))
     if connection.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
@@ -5200,10 +5389,10 @@ def handle_register(environ, start_response, connection):
     cursor = connection.execute(
         """
         INSERT INTO users (
-            name, email, password_hash, role, account_state, verification_status, verification_note, created_at
-        ) VALUES (?, ?, ?, 'client', 'PENDING_VERIFICATION', 'PENDING_REVIEW', ?, ?)
+            name, email, phone, password_hash, role, account_state, verification_status, verification_note, created_at
+        ) VALUES (?, ?, ?, ?, 'client', 'PENDING_VERIFICATION', 'PENDING_REVIEW', ?, ?)
         """,
-        (name, email, hash_password(password), "Awaiting ID verification.", now_iso()),
+        (name, email, phone, hash_password(password), "Awaiting ID verification.", now_iso()),
     )
     user_id = cursor.lastrowid
     try:
@@ -5559,6 +5748,10 @@ def handle_create_order(environ, start_response, connection, user):
     data = read_post_data(environ)
     fulfillment_type = data.get("fulfillment_type", "DELIVERY")
     payment_method = data.get("payment_method", "CHIME")
+    try:
+        loyalty_points_to_use = max(0, int(data.get("loyalty_points_to_use", "0") or 0))
+    except ValueError:
+        loyalty_points_to_use = 0
     shipping_address = data.get("shipping_address", "").strip()
     if fulfillment_type == "DELIVERY" and not shipping_address:
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, "Delivery address is required for delivery orders."))
@@ -5575,6 +5768,7 @@ def handle_create_order(environ, start_response, connection, user):
             payment_method,
             data.get("coupon_code", ""),
             data.get("use_credits") == "yes",
+            loyalty_points_to_use,
         )
     except ValueError as exc:
         return text_response(start_response, order_form(connection, int(data.get("product_id", "0")), user, str(exc)))
@@ -5594,6 +5788,10 @@ def handle_cart_checkout(environ, start_response, connection, user):
         return redirect_with_message(start_response, return_to, "Your bag is empty")
     fulfillment_type = data.get("fulfillment_type", "DELIVERY")
     payment_method = data.get("payment_method", "CHIME")
+    try:
+        loyalty_points_to_use = max(0, int(data.get("loyalty_points_to_use", "0") or 0))
+    except ValueError:
+        loyalty_points_to_use = 0
     shipping_address = data.get("shipping_address", "").strip()
     if fulfillment_type == "DELIVERY" and not shipping_address:
         return redirect_with_message(start_response, return_to, "Delivery address is required")
@@ -5610,6 +5808,7 @@ def handle_cart_checkout(environ, start_response, connection, user):
             payment_method,
             data.get("coupon_code", ""),
             data.get("use_credits") == "yes",
+            loyalty_points_to_use,
         )
     except ValueError as exc:
         return redirect_with_message(start_response, return_to, str(exc))
@@ -5671,6 +5870,7 @@ def handle_update_order(environ, start_response, connection, user):
             if not reason:
                 return redirect(start_response, "/dashboard?message=Cancel reason is required")
             release_ticket_stock(connection, ticket_id)
+            restore_ticket_balances(connection, ticket)
             prior_block_id = ticket["delivery_block_id"]
             update_ticket(connection, ticket_id, status="CANCELED", cancel_reason=reason, delivery_block_id=None)
             refresh_delivery_block_status(connection, prior_block_id)
@@ -5706,6 +5906,8 @@ def handle_update_order(environ, start_response, connection, user):
             if ticket["payment_status"] != "VERIFIED":
                 return redirect(start_response, "/dashboard?message=Pickup cannot be completed until payment is verified")
             update_ticket(connection, ticket_id, status="DELIVERED", dispatcher_id=user["id"], internal_note="Customer picked up in person.")
+            delivered_ticket = single_ticket(connection, ticket_id)
+            award_loyalty_points_for_ticket(connection, delivered_ticket, user)
             increment_user_stat(connection, user["id"], "total_orders_dispatched", 1)
             log_activity(connection, user, "COMPLETE_PICKUP", f"Completed pickup for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
@@ -5814,6 +6016,7 @@ def handle_update_order(environ, start_response, connection, user):
             if not reason:
                 return redirect(start_response, "/dashboard?message=Cancel reason is required")
             release_ticket_stock(connection, ticket_id)
+            restore_ticket_balances(connection, ticket)
             prior_block_id = ticket["delivery_block_id"]
             update_ticket(connection, ticket_id, status="CANCELED", dispatcher_id=user["id"], driver_id=None, delivery_block_id=None, cancel_reason=reason)
             refresh_delivery_block_status(connection, prior_block_id)
@@ -5880,6 +6083,8 @@ def handle_update_order(environ, start_response, connection, user):
             if ticket["payment_status"] != "VERIFIED":
                 return redirect(start_response, f"/dashboard?message=Delivery cannot be completed until the bank verifies payment&open_ticket={ticket_id}")
             update_ticket(connection, ticket_id, status="DELIVERED")
+            delivered_ticket = single_ticket(connection, ticket_id)
+            award_loyalty_points_for_ticket(connection, delivered_ticket, user)
             increment_user_stat(connection, user["id"], "total_trips", 1)
             log_activity(connection, user, "DELIVER_ORDER", f"Delivered ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
             connection.commit()
