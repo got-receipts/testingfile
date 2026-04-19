@@ -2,11 +2,14 @@ import hashlib
 import html
 import mimetypes
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime
 from http import cookies
-from urllib.parse import parse_qs, urlencode
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.request import Request, urlopen
 from wsgiref.simple_server import make_server
 from flask import Flask, Response, request
 
@@ -30,6 +33,7 @@ CLEANUP_DONE = False
 POSTGRES_INIT_ATTEMPTED = False
 POSTGRES_SYNC_IN_PROGRESS = False
 EMPLOYEE_ROLES = {"banker", "dispatcher", "picker", "driver"}
+ALLOWED_PRODUCT_IMAGE_HOSTS = {"images.leafly.com", "leafly-public.imgix.net"}
 
 POSTGRES_CREATE_STATEMENTS = [
     """
@@ -1026,6 +1030,130 @@ def infer_leafly_reference(connection, product_name):
         if row["name"].lower() in cleaned.lower() or cleaned.lower() in row["name"].lower():
             return row
     return None
+
+
+def product_image_proxy_url(image_url, source_url=""):
+    if not image_url:
+        if source_url:
+            return f"/product-image?source={quote(source_url, safe='')}"
+        return "/static/budhub-logo.png"
+    if image_url.startswith("/"):
+        return image_url
+    if image_url.startswith(("http://", "https://")):
+        query = f"url={quote(image_url, safe='')}"
+        if source_url:
+            query += f"&source={quote(source_url, safe='')}"
+        return f"/product-image?{query}"
+    return "/static/budhub-logo.png"
+
+
+def cached_product_image_path(cache_key):
+    if not os.path.isdir(PRODUCT_UPLOADS_DIR):
+        return None
+    prefix = f"{cache_key}."
+    for filename in os.listdir(PRODUCT_UPLOADS_DIR):
+        if filename.startswith(prefix):
+            return os.path.join(PRODUCT_UPLOADS_DIR, filename)
+    return None
+
+
+def placeholder_product_image_response(start_response):
+    placeholder_path = os.path.join(STATIC_DIR, "budhub-logo.png")
+    if not os.path.isfile(placeholder_path):
+        return text_response(start_response, "Not found", status="404 Not Found", content_type="text/plain; charset=utf-8")
+    with open(placeholder_path, "rb") as handle:
+        content = handle.read()
+    start_response("200 OK", [("Content-Type", "image/png"), ("Cache-Control", "public, max-age=3600")])
+    return [content]
+
+
+def is_leafly_default_image(image_url):
+    if not image_url:
+        return True
+    return "images.leafly.com/flower-images/defaults/" in image_url
+
+
+def fetch_leafly_profile_image_url(source_url):
+    parsed = urlparse(source_url)
+    if parsed.scheme not in {"http", "https"} or "leafly.com" not in parsed.netloc.lower():
+        return ""
+    try:
+        request = Request(
+            source_url,
+            headers={
+                "User-Agent": "BudHubStorefront/0.3",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        with urlopen(request, timeout=12) as response:
+            page_html = response.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return ""
+
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'"image"\s*:\s*"([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_html, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = html.unescape(match.group(1)).replace("\\u002F", "/").replace("\\/", "/")
+        if candidate.startswith("//"):
+            candidate = f"https:{candidate}"
+        if candidate.startswith(("http://", "https://")) and any(host in candidate for host in ALLOWED_PRODUCT_IMAGE_HOSTS):
+            return candidate
+    return ""
+
+
+def serve_product_image(environ, start_response):
+    remote_url = query_params(environ).get("url", "").strip()
+    source_url = query_params(environ).get("source", "").strip()
+    if source_url and (not remote_url or is_leafly_default_image(remote_url)):
+        resolved_profile_image = fetch_leafly_profile_image_url(source_url)
+        if resolved_profile_image:
+            remote_url = resolved_profile_image
+    parsed = urlparse(remote_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return placeholder_product_image_response(start_response)
+    if parsed.netloc.lower() not in ALLOWED_PRODUCT_IMAGE_HOSTS:
+        return placeholder_product_image_response(start_response)
+
+    os.makedirs(PRODUCT_UPLOADS_DIR, exist_ok=True)
+    cache_key = hashlib.sha256(remote_url.encode("utf-8")).hexdigest()
+    cached_path = cached_product_image_path(cache_key)
+    if cached_path and os.path.isfile(cached_path):
+        with open(cached_path, "rb") as handle:
+            content = handle.read()
+        content_type = mimetypes.guess_type(cached_path)[0] or "image/jpeg"
+        start_response("200 OK", [("Content-Type", content_type), ("Cache-Control", "public, max-age=86400")])
+        return [content]
+
+    try:
+        request = Request(
+            remote_url,
+            headers={
+                "User-Agent": "BudHubStorefront/0.3",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://officialbudhub.com/",
+            },
+        )
+        with urlopen(request, timeout=12) as response:
+            content = response.read()
+            content_type = response.headers.get_content_type() or "image/jpeg"
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return placeholder_product_image_response(start_response)
+
+    extension = mimetypes.guess_extension(content_type) or os.path.splitext(parsed.path)[1] or ".jpg"
+    if extension == ".jpe":
+        extension = ".jpg"
+    cache_path = os.path.join(PRODUCT_UPLOADS_DIR, f"{cache_key}{extension}")
+    with open(cache_path, "wb") as handle:
+        handle.write(content)
+    start_response("200 OK", [("Content-Type", content_type), ("Cache-Control", "public, max-age=86400")])
+    return [content]
 
 
 def parse_cookies(environ):
@@ -3472,7 +3600,7 @@ def render_store_page(connection, user=None, message=None, level="info", filters
         cards.append(
             f"""
             <article class="product-card{' is-hidden' if not matches_filters else ''}" data-category="{html.escape(product['category'])}" data-strain="{html.escape(product_strain)}" data-name="{html.escape(str(product['name']).lower())}">
-              {f'<img class="product-card-image" src="{html.escape(product["image_url"])}" alt="{html.escape(product["name"])}">' if product["image_url"] else ""}
+              <img class="product-card-image" src="{html.escape(product_image_proxy_url(product['image_url'], product['source_url'] or ''))}" alt="{html.escape(product['name'])}" loading="lazy">
               <div class="product-card-top">
                 <span class="eyebrow">{html.escape(card_label)} | In Stock: {product["stock"]}</span>
                 <h3>{html.escape(product["name"])}</h3>
@@ -5548,6 +5676,8 @@ def application(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET").upper()
     if path.startswith("/static/"):
         return serve_static(environ, start_response)
+    if path == "/product-image" and method == "GET":
+        return serve_product_image(environ, start_response)
     with db_connection() as connection:
         user = get_current_user(environ, connection)
         params = query_params(environ)
