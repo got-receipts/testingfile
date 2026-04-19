@@ -837,6 +837,18 @@ select {
   color: var(--text);
 }
 
+select {
+  color-scheme: dark;
+  appearance: none;
+  background-image: linear-gradient(180deg, #242424, #171717);
+}
+
+select option,
+select optgroup {
+  background: #161616;
+  color: #f7f8f3;
+}
+
 textarea {
   min-height: 120px;
   resize: vertical;
@@ -884,7 +896,7 @@ button:disabled {
 }
 
 .danger {
-  background: #a12d2d;
+  background: linear-gradient(180deg, #c54848, #912222);
 }
 
 .button.ghost {
@@ -962,6 +974,47 @@ button:disabled {
 .chat-pill,
 .chat-launch {
   white-space: nowrap;
+}
+
+.center-notice-card {
+  max-width: 520px;
+  text-align: center;
+}
+
+.support-alert-card {
+  border-color: rgba(255, 214, 102, 0.18);
+}
+
+.emergency-trigger {
+  background: linear-gradient(180deg, #365f37, #203a21);
+  border-color: rgba(184, 255, 169, 0.34);
+  color: #f7fff4;
+}
+
+.emergency-buttons-bright {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.emergency-action {
+  min-height: 52px;
+  border-width: 1px;
+}
+
+.emergency-medical-button.emergency-action {
+  background: linear-gradient(180deg, #e2bc4f, #a77d18);
+  color: #201600;
+  border-color: rgba(255, 226, 141, 0.52);
+}
+
+.danger.emergency-action {
+  background: linear-gradient(180deg, #de5e5e, #8e1f1f);
+  border-color: rgba(255, 163, 163, 0.42);
+}
+
+.button.ghost.emergency-action {
+  background: linear-gradient(180deg, #4a5a69, #28333d);
+  border-color: rgba(179, 223, 255, 0.32);
+  color: #edf8ff;
 }
 
 .inline-form {

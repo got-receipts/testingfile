@@ -2486,6 +2486,116 @@ def render_order_success_widget(message):
     """
 
 
+def render_center_notice_widget(modal_id, eyebrow, title, body, button_text="OK", href="/dashboard"):
+    return f"""
+    <div class="modal-shell" id="{html.escape(modal_id)}">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card center-notice-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">{html.escape(eyebrow)}</span>
+            <h3>{html.escape(title)}</h3>
+          </div>
+        </div>
+        <p>{html.escape(body)}</p>
+        <div class="hero-actions">
+          <a class="button" href="{html.escape(href)}">{html.escape(button_text)}</a>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def render_payment_block_widget(message):
+    if message != "Delivery cannot be completed until the bank verifies payment":
+        return ""
+    return render_center_notice_widget(
+        "payment-block-modal",
+        "Payment Hold",
+        "Bank verification still required",
+        "Delivery stays paused until the in-house bank verifies payment for this ticket.",
+    )
+
+
+def render_driver_emergency_widget(ticket, index):
+    widget_id = f"driver-emergency-widget-{ticket['id']}-{index}"
+    return f"""
+    <button type="button" class="button emergency-trigger" data-open-emergency-widget="{widget_id}">Open Emergency Resources</button>
+    <div class="modal-shell is-hidden" id="{widget_id}">
+      <div class="modal-backdrop" data-close-emergency-widget="{widget_id}"></div>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">Driver Safety Resources</span>
+            <h3>Emergency dispatch ticket tools</h3>
+          </div>
+          <button type="button" class="button ghost modal-close" data-close-emergency-widget="{widget_id}">Close</button>
+        </div>
+        <div class="reason-box">
+          Choosing any emergency option creates an emergency ticket with dispatch immediately and keeps this route attached to the alert.
+        </div>
+        <div class="card-buttons emergency-buttons emergency-buttons-bright">
+          <form method="post" action="/orders/update" class="inline-form">
+            <input type="hidden" name="order_id" value="{ticket["id"]}">
+            <input type="hidden" name="action" value="driver_emergency">
+            <input type="hidden" name="emergency_type" value="medical_emergency">
+            <button type="submit" class="emergency-medical-button emergency-action">Medical Emergency</button>
+          </form>
+          <form method="post" action="/orders/update" class="inline-form">
+            <input type="hidden" name="order_id" value="{ticket["id"]}">
+            <input type="hidden" name="action" value="driver_emergency">
+            <input type="hidden" name="emergency_type" value="car_accident">
+            <button type="submit" class="danger emergency-action">Car Accident</button>
+          </form>
+          <form method="post" action="/orders/update" class="inline-form">
+            <input type="hidden" name="order_id" value="{ticket["id"]}">
+            <input type="hidden" name="action" value="driver_emergency">
+            <input type="hidden" name="emergency_type" value="robbery">
+            <button type="submit" class="danger emergency-action">Robbery</button>
+          </form>
+          <form method="post" action="/orders/update" class="inline-form">
+            <input type="hidden" name="order_id" value="{ticket["id"]}">
+            <input type="hidden" name="action" value="driver_emergency">
+            <input type="hidden" name="emergency_type" value="traffic_stop">
+            <button type="submit" class="button ghost emergency-action">Traffic Stop</button>
+          </form>
+        </div>
+        <div class="item-pill-list">
+          <div class="item-pill"><strong>Medical</strong><span>Call 911 first and secure the scene before updating dispatch.</span></div>
+          <div class="item-pill"><strong>Accident</strong><span>Stay with the vehicle when safe and wait for dispatch follow-up.</span></div>
+          <div class="item-pill"><strong>Robbery</strong><span>Prioritize safety, comply, then move to a safe location and hold for dispatch.</span></div>
+          <div class="item-pill"><strong>Traffic Stop</strong><span>Follow officer instructions and let dispatch know once the stop is complete.</span></div>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def render_driver_emergency_widget_script():
+    return """
+    <script>
+      (function () {
+        document.querySelectorAll('[data-open-emergency-widget]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-open-emergency-widget'));
+            if (modal) {
+              modal.classList.remove('is-hidden');
+            }
+          });
+        });
+        document.querySelectorAll('[data-close-emergency-widget]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            var modal = document.getElementById(button.getAttribute('data-close-emergency-widget'));
+            if (modal) {
+              modal.classList.add('is-hidden');
+            }
+          });
+        });
+      })();
+    </script>
+    """
+
+
 def render_account_recovery_widget(users, viewer_role):
     title = "Engineer Account Recovery" if viewer_role == "helpdesk" else "Admin Account Recovery"
     allowed_accounts = [account for account in users if account["role"] != "helpdesk"]
@@ -3785,7 +3895,8 @@ def render_banker_dashboard(connection, user, message=None, level="info", open_t
 
 def render_dispatcher_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
     tickets = ticket_rows(connection, "", ())
-    emergency_alerts = support_rows(connection, "WHERE support_tickets.category LIKE 'EMERGENCY_%' AND support_tickets.status != 'CLOSED'", ())
+    emergency_alerts = support_rows(connection, "WHERE support_tickets.category LIKE 'EMERGENCY_%' AND support_tickets.status NOT IN ('CLOSED', 'CANCELED', 'FOUNDED', 'UNFOUNDED')", ())
+    emergency_messages = support_messages_map(connection, [alert["id"] for alert in emergency_alerts])
     items_map = ticket_items_map(connection, [ticket["id"] for ticket in tickets])
     message_map = order_messages_map(connection, [ticket["id"] for ticket in tickets])
     blocks = delivery_block_rows(connection)
@@ -3997,7 +4108,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
       <div class="order-card-grid">
         {''.join(
             f"""
-            <article class="order-card {html.escape(emergency_meta(alert['category'].replace('EMERGENCY_', '').lower()).get('ui_class', ''))}">
+            <article class="order-card support-alert-card {html.escape(emergency_meta(alert['category'].replace('EMERGENCY_', '').lower()).get('ui_class', ''))}">
               <div class="order-card-head">
                 <div>
                   <span class="eyebrow">{html.escape(alert['priority'])} Priority</span>
@@ -4011,7 +4122,43 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
                 <span>Status: {html.escape(alert['status'])}</span>
               </div>
               <div class="reason-box">{html.escape(alert['reason'])}</div>
+              <button type="button" class="button ghost" data-open-emergency-widget="dispatch-alert-{alert['id']}">Open Alert Ticket</button>
             </article>
+            <div class="modal-shell is-hidden" id="dispatch-alert-{alert['id']}">
+              <div class="modal-backdrop" data-close-emergency-widget="dispatch-alert-{alert['id']}"></div>
+              <div class="modal-card modal-card-wide">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">{html.escape(alert['priority'])} Priority</span>
+                    <h3>{html.escape(emergency_meta(alert['category'].replace('EMERGENCY_', '').lower()).get('label', alert['category']))}</h3>
+                  </div>
+                  <button type="button" class="button ghost modal-close" data-close-emergency-widget="dispatch-alert-{alert['id']}">Close</button>
+                </div>
+                <div class="order-meta">
+                  <span>Driver: {html.escape(alert['user_name'])}</span>
+                  <span>Ticket: {html.escape(alert['related_ticket_number'] or 'No linked ticket')}</span>
+                  <span>Opened By: {html.escape(alert['opened_by_name'])}</span>
+                  <span>Status: {html.escape(alert['status'])}</span>
+                </div>
+                <div class="reason-box">{html.escape(alert['reason'])}</div>
+                <div class="chat-thread">
+                  {''.join(f"<article class='chat-message'><strong>{html.escape(item['author_name'])}</strong><p>{html.escape(item['message'])}</p><small>{html.escape(item['created_at'])}</small></article>" for item in emergency_messages.get(alert['id'], [])) or "<p class='subtle'>No replies yet.</p>"}
+                </div>
+                <form method="post" action="/support/update" class="action-stack">
+                  <input type="hidden" name="ticket_id" value="{alert['id']}">
+                  <label>Alert Status
+                    <select name="status">
+                      <option value="OPEN" {'selected' if alert['status'] == 'OPEN' else ''}>Open</option>
+                      <option value="FOUNDED" {'selected' if alert['status'] == 'FOUNDED' else ''}>Founded</option>
+                      <option value="UNFOUNDED" {'selected' if alert['status'] == 'UNFOUNDED' else ''}>Unfounded</option>
+                      <option value="CANCELED" {'selected' if alert['status'] == 'CANCELED' else ''}>Canceled</option>
+                    </select>
+                  </label>
+                  <label>Dispatch Reply<textarea name="reply_message" placeholder="Add a response or update for this emergency ticket"></textarea></label>
+                  <button type="submit">Update Emergency Ticket</button>
+                </form>
+              </div>
+            </div>
             """
             for alert in emergency_alerts
         ) or '<p>No active emergency alerts.</p>'}
@@ -4022,7 +4169,7 @@ def render_dispatcher_dashboard(connection, user, message=None, level="info", op
     {render_credit_issue_panel(connection)}
     {render_activity_list(connection, user["id"], title="Your Dispatch Activity")}
     """
-    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
+    return page("Dispatcher Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_driver_emergency_widget_script())
 
 
 def render_picker_dashboard(connection, user, message=None, level="info", open_ticket_id=None):
@@ -4105,7 +4252,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
         </div>
         <div class="order-meta">
           <span>Total: {format_money(ticket["total_amount"])}</span>
-          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending')}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
         </div>
         """
@@ -4116,47 +4263,20 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
           <span>Total: {format_money(ticket["total_amount"])}</span>
           <span>Type: {html.escape(ticket["fulfillment_type"].title())}</span>
           <span>Address: {html.escape(ticket["shipping_address"])}</span>
-          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending')}</span>
+          <span>Block: {html.escape(ticket["delivery_block_name"] or 'Dispatch block pending to bypass')}</span>
           <span>Dispatch: {html.escape(ticket["dispatcher_name"] or 'Dispatch board')}</span>
           <span>Due: {format_money(max(0, ticket["total_amount"] - ticket["discount_amount"] - ticket["credit_applied"]))}</span>
         </div>
         {f"<div class='map-panel'><a class='button ghost' href='{html.escape(maps_link)}' target='_blank' rel='noopener noreferrer'>Open in Google Maps</a><iframe class='address-embed order-map' src='{html.escape(maps_embed)}' loading='lazy'></iframe></div>" if maps_link and maps_embed else ""}
         {render_item_list(items_map.get(ticket["id"], []))}
+        {f"<div class='tracker-note'>{html.escape(ticket['internal_note'])}</div>" if ticket['internal_note'] else ""}
         <div class="ticket-actions">
           <form method="post" action="/orders/update" class="action-stack">
             <input type="hidden" name="order_id" value="{ticket["id"]}">
             <input type="hidden" name="action" value="{action}">
             <button type="submit">{button}</button>
           </form>
-          <div class="emergency-panel">
-            <strong>Driver Safety Resources</strong>
-            <div class="card-buttons emergency-buttons">
-              <form method="post" action="/orders/update" class="inline-form">
-                <input type="hidden" name="order_id" value="{ticket["id"]}">
-                <input type="hidden" name="action" value="driver_emergency">
-                <input type="hidden" name="emergency_type" value="medical_emergency">
-                <button type="submit" class="emergency-medical-button">Medical Emergency</button>
-              </form>
-              <form method="post" action="/orders/update" class="inline-form">
-                <input type="hidden" name="order_id" value="{ticket["id"]}">
-                <input type="hidden" name="action" value="driver_emergency">
-                <input type="hidden" name="emergency_type" value="car_accident">
-                <button type="submit" class="danger">Car Accident</button>
-              </form>
-              <form method="post" action="/orders/update" class="inline-form">
-                <input type="hidden" name="order_id" value="{ticket["id"]}">
-                <input type="hidden" name="action" value="driver_emergency">
-                <input type="hidden" name="emergency_type" value="robbery">
-                <button type="submit" class="danger">Robbery</button>
-              </form>
-              <form method="post" action="/orders/update" class="inline-form">
-                <input type="hidden" name="order_id" value="{ticket["id"]}">
-                <input type="hidden" name="action" value="driver_emergency">
-                <input type="hidden" name="emergency_type" value="traffic_stop">
-                <button type="submit" class="button ghost">Traffic Stop</button>
-              </form>
-            </div>
-          </div>
+          {render_driver_emergency_widget(ticket, index)}
         </div>
         {render_order_chat(ticket, user, message_map.get(ticket["id"], []))}
         """
@@ -4164,6 +4284,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     body = f"""
     {render_account_stats_panel(connection, user)}
     {render_staff_clock_panel(connection, user)}
+    {render_payment_block_widget(message)}
     <section class="stats-row">
       <div class="stat-card"><span>Assigned Blocks</span><strong>{len(block_names)}</strong></div>
       <div class="stat-card"><span>Assigned Routes</span><strong>{sum(1 for ticket in tickets if ticket['status'] == 'DRIVER_ASSIGNED')}</strong></div>
@@ -4171,7 +4292,7 @@ def render_driver_dashboard(connection, user, message=None, level="info", open_t
     </section>
     <section class="panel"><h2>Driver Queue</h2><div class="order-card-grid">{''.join(cards) if cards else '<p>No routes assigned. Dispatch still needs to assign a driver.</p>'}</div></section>
     """
-    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id))
+    return page("Driver Dashboard", body, user=user, message=message, level=level, auto_refresh=True, extra_shell=render_staff_activity_widget(connection, user) + render_ticket_modal_script(open_ticket_id) + render_driver_emergency_widget_script())
 
 
 def render_admin_home(connection, user, message=None, level="info"):
@@ -5003,7 +5124,7 @@ def handle_update_order(environ, start_response, connection, user):
             if not driver:
                 return redirect(start_response, "/dashboard?message=Choose a valid driver")
             prior_block_id = ticket["delivery_block_id"]
-            update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], delivery_block_id=None, internal_note=f"Sent directly to driver {driver['name']}.")
+            update_ticket(connection, ticket_id, status="DRIVER_ASSIGNED", driver_id=driver["id"], dispatcher_id=user["id"], delivery_block_id=None, internal_note=f"Sent directly to driver {driver['name']}. Block: Dispatch block pending to bypass.")
             refresh_delivery_block_status(connection, prior_block_id)
             increment_user_stat(connection, user["id"], "total_orders_dispatched", 1)
             log_activity(connection, user, "DIRECT_ASSIGN_DRIVER", f"Sent ticket #{ticket['ticket_number']} directly to driver {driver['name']}.", target_user_id=ticket["client_id"])
@@ -5107,7 +5228,7 @@ def handle_update_order(environ, start_response, connection, user):
                 ),
             )
             connection.commit()
-            return redirect(start_response, f"/dashboard?message={meta['driver_message']}")
+            return redirect(start_response, f"/dashboard?message=Emergency ticket created with dispatch. {meta['driver_message']}&open_ticket={ticket_id}")
         if action == "start_route" and ticket["status"] == "DRIVER_ASSIGNED":
             update_ticket(connection, ticket_id, status="OUT_FOR_DELIVERY")
             log_activity(connection, user, "START_ROUTE", f"Started route for ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
@@ -5115,7 +5236,7 @@ def handle_update_order(environ, start_response, connection, user):
             return redirect(start_response, "/dashboard?message=Route started")
         if action == "deliver_order" and ticket["status"] == "OUT_FOR_DELIVERY":
             if ticket["payment_status"] != "VERIFIED":
-                return redirect(start_response, "/dashboard?message=Delivery cannot be completed until the bank verifies payment")
+                return redirect(start_response, f"/dashboard?message=Delivery cannot be completed until the bank verifies payment&open_ticket={ticket_id}")
             update_ticket(connection, ticket_id, status="DELIVERED")
             increment_user_stat(connection, user["id"], "total_trips", 1)
             log_activity(connection, user, "DELIVER_ORDER", f"Delivered ticket #{ticket['ticket_number']}.", target_user_id=ticket["client_id"])
@@ -5313,21 +5434,27 @@ def handle_engineer_delete_user(environ, start_response, connection, user):
 
 
 def handle_update_support_ticket(environ, start_response, connection, user):
-    gate = require_role(start_response, user, {"admin"})
+    gate = require_role(start_response, user, {"admin", "dispatcher", "helpdesk"})
     if gate:
         return gate
+    redirect_target = "/admin" if user["role"] in {"admin", "helpdesk"} else "/dashboard"
     data = read_post_data(environ)
     ticket_id = int(data.get("ticket_id", "0"))
-    status = data.get("status", "OPEN")
+    status = (data.get("status", "OPEN") or "OPEN").upper()
     resolution_note = data.get("resolution_note", "").strip()
     reply_message = data.get("reply_message", "").strip()
     assigned_to = data.get("assigned_to", "").strip()
     ticket = connection.execute("SELECT * FROM support_tickets WHERE id = ?", (ticket_id,)).fetchone()
     if not ticket:
-        return redirect(start_response, "/admin?message=Support ticket not found")
+        return redirect(start_response, f"{redirect_target}?message=Support ticket not found")
+    allowed_statuses = {"OPEN", "REVIEWED", "CLOSED", "CANCELED", "FOUNDED", "UNFOUNDED"}
+    if status not in allowed_statuses:
+        status = "OPEN"
+    updated_resolution_note = ticket["resolution_note"] if user["role"] == "dispatcher" else resolution_note
+    updated_assigned_to = ticket["assigned_to"] if user["role"] == "dispatcher" else (int(assigned_to) if assigned_to else None)
     connection.execute(
         "UPDATE support_tickets SET status = ?, resolution_note = ?, assigned_to = ?, updated_at = ? WHERE id = ?",
-        (status, resolution_note, int(assigned_to) if assigned_to else None, now_iso(), ticket_id),
+        (status, updated_resolution_note, updated_assigned_to, now_iso(), ticket_id),
     )
     if reply_message:
         connection.execute(
@@ -5336,7 +5463,7 @@ def handle_update_support_ticket(environ, start_response, connection, user):
         )
     log_activity(connection, user, "UPDATE_SUPPORT_TICKET", f"Updated support ticket #{ticket_id} to {status}.", target_user_id=ticket["user_id"])
     connection.commit()
-    return redirect(start_response, "/admin?message=Support ticket updated")
+    return redirect(start_response, f"{redirect_target}?message=Support ticket updated")
 
 
 def handle_update_guest_help(environ, start_response, connection, user):
