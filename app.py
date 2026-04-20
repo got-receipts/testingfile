@@ -27,6 +27,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "verification")
 PRODUCT_UPLOADS_DIR = os.path.join(STATIC_DIR, "uploads", "products")
 SESSION_COOKIE = "budhub_session"
+AGE_GATE_COOKIE = "budhub_age_gate"
 APP_NAME = "Official BudHub"
 APP_TAGLINE = "The 518 cannabis delivery platform for the wider Capital Region."
 CLEANUP_DONE = False
@@ -2139,6 +2140,72 @@ def render_nav(user, cart_count=0, eta_text=""):
     return "".join(links)
 
 
+def render_age_gate():
+    return f"""
+  <div class="modal-shell is-hidden" id="age-gate-modal" aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card" style="max-width: 460px; text-align: center;">
+      <div class="panel-head" style="justify-content: center;">
+        <div>
+          <span class="eyebrow">Age Verification</span>
+          <h3>Are you 21 years of age or older?</h3>
+        </div>
+      </div>
+      <p>You must be 21 years of age or older to enter and use this site.</p>
+      <div class="card-buttons" style="justify-content: center; margin-top: 1rem;">
+        <button type="button" id="age-gate-confirm">Yes, I am 21+</button>
+        <button type="button" class="button ghost" id="age-gate-deny">No</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {{
+      var cookieName = '{AGE_GATE_COOKIE}=';
+      var modal = document.getElementById('age-gate-modal');
+      var confirmButton = document.getElementById('age-gate-confirm');
+      var denyButton = document.getElementById('age-gate-deny');
+      function hasAgeCookie() {{
+        return document.cookie.split(';').some(function (entry) {{
+          return entry.trim().indexOf(cookieName) === 0;
+        }});
+      }}
+      function openGate() {{
+        if (!modal) {{
+          return;
+        }}
+        modal.classList.remove('is-hidden');
+        modal.setAttribute('aria-hidden', 'false');
+        document.body.style.overflow = 'hidden';
+      }}
+      function closeGate() {{
+        if (!modal) {{
+          return;
+        }}
+        modal.classList.add('is-hidden');
+        modal.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = '';
+      }}
+      if (!hasAgeCookie()) {{
+        openGate();
+      }}
+      if (confirmButton) {{
+        confirmButton.addEventListener('click', function () {{
+          var expiry = new Date();
+          expiry.setFullYear(expiry.getFullYear() + 1);
+          document.cookie = '{AGE_GATE_COOKIE}=verified; expires=' + expiry.toUTCString() + '; path=/; SameSite=Lax';
+          closeGate();
+        }});
+      }}
+      if (denyButton) {{
+        denyButton.addEventListener('click', function () {{
+          window.location.href = 'https://www.google.com/';
+        }});
+      }}
+    }})();
+  </script>
+"""
+
+
 def page(title, body, user=None, message=None, level="info", cart_count=0, auto_refresh=False, extra_shell=""):
     refresh_script = ""
     if auto_refresh:
@@ -2190,6 +2257,7 @@ def page(title, body, user=None, message=None, level="info", cart_count=0, auto_
     <span>OS TB Kernal v0.4</span>
     <span>NYS OCM Compliance notice. Must be 21 years of age to purchase. Smoke Responsibly.</span>
   </footer>
+  {render_age_gate()}
   {extra_shell}
   {render_help_button(user)}
 </body>
